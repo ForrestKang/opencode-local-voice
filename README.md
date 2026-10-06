@@ -56,10 +56,12 @@
 ## 效果
 
 <p align="center">
-  <img src="docs/assets/recording.png" alt="录音界面：波形、计时、取消 / 停止按钮" width="720">
+  <img src="docs/assets/idle.png" alt="空闲状态：麦克风按钮位于发送键左侧" width="720">
+  <br>
+  <img src="docs/assets/recording.png" alt="录音中：波形、计时、停止" width="720">
 </p>
 
-> 实录截图（浅色主题）：点击麦克风后进入录音状态 —— 波形 + 计时 + 停止
+> 实录截图（浅色主题）：上 —— 空闲状态，麦克风按钮就在发送键左边；下 —— 点击后进入录音状态（波形 + 计时 + 停止）
 
 - 点 🎤 开始录音：图标变红、呼吸闪烁
 - 说完再点一下（或满 60 秒自动结束）
