@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -76,6 +77,33 @@ def read_wav16k(path):
             raise ValueError("expected 16kHz mono s16 wav")
         data = w.readframes(w.getnframes())
     return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+PUNCT_CHARS = "，。！？；：、,.!?;:"
+_FULLWIDTH = {",": "，", "?": "？", "!": "！", ";": "；", ":": "："}
+_CJK_RANGE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_PUNCT_PROMPT = "以下是普通话的句子，请为句子加上标点符号。"
+
+
+def punctuation_count(text):
+    return sum(1 for ch in text if ch in PUNCT_CHARS)
+
+
+def normalize_punctuation(text):
+    """把中文语境里的半角标点规范成全角；不动英文单词、文件名、小数里的符号。"""
+    out = []
+    for i, ch in enumerate(text):
+        prev = text[i - 1] if i > 0 else ""
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        prev_cjk = bool(_CJK_RANGE.search(prev))
+        if prev_cjk and ch in _FULLWIDTH:
+            out.append(_FULLWIDTH[ch])
+            continue
+        if prev_cjk and ch == "." and not (nxt.isascii() and nxt.isalnum()):
+            out.append("。")
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def get_model():
@@ -180,6 +208,24 @@ class Handler(BaseHTTPRequestHandler):
                     condition_on_previous_text=False,
                 )
                 text = "".join(s.text for s in segments).strip()
+                lang = getattr(info, "language", None)
+                if lang == "zh" and len(text) >= 10 and punctuation_count(text) == 0:
+                    try:
+                        retry_segments, _retry_info = get_model().transcribe(
+                            audio,
+                            language="zh",
+                            beam_size=5,
+                            vad_filter=True,
+                            condition_on_previous_text=False,
+                            initial_prompt=_PUNCT_PROMPT,
+                        )
+                        retry_text = "".join(s.text for s in retry_segments).strip()
+                        if len(retry_text) >= max(4, int(len(text) * 0.6)):
+                            text = retry_text
+                            log("punctuation retry adopted")
+                    except Exception as exc:
+                        log("punctuation retry failed: %s" % exc)
+                text = normalize_punctuation(text)
                 log(
                     "transcribed %.2fs audio in %.1fs (%d characters)"
                     % (getattr(info, "duration", 0), time.time() - t0, len(text))
