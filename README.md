@@ -11,7 +11,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-0078D6.svg?style=for-the-badge" alt="Platform"></a>
-  <a href="VERSION"><img src="https://img.shields.io/badge/Version-v0.1.1-orange.svg?style=for-the-badge" alt="Version"></a>
+  <a href="VERSION"><img src="https://img.shields.io/badge/Version-v0.1.2-orange.svg?style=for-the-badge" alt="Version"></a>
 </p>
 
 <p align="center">
@@ -63,9 +63,9 @@
 
 > 实录截图（浅色主题）：上 —— 空闲状态，麦克风按钮就在发送键左边；下 —— 点击后进入录音状态（波形 + 计时 + 停止）
 
-- 点 🎤 开始录音：图标变红、呼吸闪烁
-- 说完再点一下（或满 60 秒自动结束）
-- 识别中图标转圈，1 秒左右后**文字直接出现在输入框**，改完按回车即发
+- 点 🎤 开始录音：工具栏变成录音条（波形 + 计时）
+- 说完按 **Enter**（或点停止、或满 60 秒自动结束）立即转写；按 **Esc** 取消
+- 识别中图标转圈，1 秒左右后**文字直接出现在输入框**，检查后按回车发送
 - 自动识别中 / 英 / 混说，不需要切换
 
 ---

@@ -1,4 +1,4 @@
-/* oc-mic-v0.1.1; oc-mic-v3 compatible patch entry */
+/* oc-mic-v0.1.2; oc-mic-v3 compatible patch entry */
 ;(function () {
   "use strict"
   if (window.__ocMicInstalled) return
@@ -69,7 +69,7 @@
     b.innerHTML = icon; return b
   }
   function makeUi() {
-    var root = document.createElement("div"); root.id = "oc-mic-controls"; root.setAttribute("data-oc-mic-version", "0.1.1")
+    var root = document.createElement("div"); root.id = "oc-mic-controls"; root.setAttribute("data-oc-mic-version", "0.1.2")
     var status = document.createElement("span"); status.className = "oc-mic-status"; status.setAttribute("aria-hidden", "true")
     var live = document.createElement("span"); live.className = "oc-mic-a11y"; live.setAttribute("role", "status"); live.setAttribute("aria-live", "polite")
     var cancel = actionButton("oc-mic-cancel", "取消录音", "×"); cancel.className = "oc-mic-cancel"
@@ -102,14 +102,14 @@
     ui.cancel.hidden = !(state === "recording" || state === "busy" || state === "requesting" || state === "result")
     var label = "语音输入", text = "", icon = MIC, cancelLabel = "取消录音"
     if (state === "requesting") { label = "正在请求麦克风权限"; text = "等待麦克风"; icon = SPIN }
-    if (state === "recording") { label = "停止并转写"; text = "00:00"; icon = STOP }
+    if (state === "recording") { label = "停止并转写（Enter）"; text = "00:00"; icon = STOP }
     if (state === "busy") { label = "正在转写"; text = "正在转写"; icon = SPIN; cancelLabel = "取消转写" }
     if (state === "error") { label = "重试语音输入：" + errorText; text = errorText }
     if (state === "result") { label = "复制转写结果"; text = errorText || "请复制转写结果"; cancelLabel = "丢弃转写结果" }
     ui.status.hidden = !text; ui.status.textContent = text; ui.status.title = text
     ui.btn.innerHTML = icon; ui.btn.title = label; ui.btn.setAttribute("aria-label", label)
     ui.cancel.title = cancelLabel; ui.cancel.setAttribute("aria-label", cancelLabel)
-    ui.live.textContent = state === "recording" ? "录音开始，按 Esc 取消" : label
+    ui.live.textContent = state === "recording" ? "录音开始：Enter 完成并转写，Esc 取消" : label
   }
   function mount() {
     injectStyle()
@@ -120,7 +120,7 @@
     var stale = document.getElementById("oc-mic-btn")
     if (stale && stale !== ui.btn) stale.remove()
     if (ui.root.parentElement !== found.toolbar || ui.root.nextElementSibling !== found.anchor) {
-      found.toolbar.insertBefore(ui.root, found.anchor); log("v0.1.1 mounted on prompt toolbar")
+      found.toolbar.insertBefore(ui.root, found.anchor); log("v0.1.2 mounted on prompt toolbar")
     }
     currentForm = found.form
     ui.root.classList.toggle("oc-mic-compact", found.form.clientWidth < 500)
@@ -325,7 +325,7 @@
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && ["requesting", "recording", "busy"].indexOf(state) !== -1) { e.preventDefault(); e.stopPropagation(); cancelRecording() } }, true)
   // Guard the native submit routes without overwriting framework-owned disabled state.
   document.addEventListener("click", function (e) { if (active() && currentForm && e.target.closest && e.target.closest('[data-action="prompt-submit"]') && currentForm.contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation() } }, true)
-  document.addEventListener("keydown", function (e) { if (active() && currentForm && currentForm.contains(e.target) && e.key === "Enter" && !e.isComposing && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation() } }, true)
+  document.addEventListener("keydown", function (e) { if (!active() || e.key !== "Enter" || e.isComposing || e.shiftKey) return; if (state === "recording") { e.preventDefault(); e.stopImmediatePropagation(); stopRecording(); return } if (currentForm && currentForm.contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation() } }, true)
   document.addEventListener("submit", function (e) { if (active() && e.target === currentForm) { e.preventDefault(); e.stopImmediatePropagation() } }, true)
   document.addEventListener("compositionstart", function (e) { if (currentForm && currentForm.contains(e.target)) composing = true })
   document.addEventListener("compositionend", function () { composing = false })
@@ -334,5 +334,5 @@
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true })
   setInterval(function () { schedule() }, 2500)
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { schedule() }); else schedule()
-  log("v0.1.1 script ready")
+  log("v0.1.2 script ready")
 })()
