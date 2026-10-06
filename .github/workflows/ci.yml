@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: JavaScript syntax check
+        run: |
+          node --check windows/oc-mic.js
+          node --check macos/oc-mic.js
+          node --check windows/patch-oc-mic.js
+          node --check macos/patch-oc-mic.js
+
+      - name: Shell syntax check
+        run: |
+          bash -n macos/install.sh
+          bash -n macos/apply-oc-mic.sh
+          bash -n macos/restore-oc-mic.sh
+
+      - name: Python syntax check
+        run: |
+          python3 -m py_compile windows/stt_server.py
+          python3 -m py_compile macos/stt_server.py
+
+      - name: Shared files consistency
+        run: |
+          cmp windows/oc-mic.js macos/oc-mic.js
+          cmp windows/stt_server.py macos/stt_server.py

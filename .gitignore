@@ -1,0 +1,7 @@
+app.asar.patched
+app.asar.bak
+app.asar.original
+backup/
+*.log
+*.log.1
+__pycache__/

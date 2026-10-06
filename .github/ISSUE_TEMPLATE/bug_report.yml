@@ -1,0 +1,43 @@
+name: Bug 报告
+description: 按钮没出现 / 识别失败 / 其他异常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请先看一眼 README 的「常见问题」。
+        请务必附上两个日志文件的内容（如存在），否则很难定位问题。
+  - type: input
+    id: os
+    attributes:
+      label: 系统
+      placeholder: 例如 Windows 11 23H2 / macOS 15 (Apple Silicon)
+    validations:
+      required: true
+  - type: input
+    id: opencode
+    attributes:
+      label: OpenCode 桌面版版本
+      placeholder: 例如 1.18.33（About 对话框或安装目录可查）
+    validations:
+      required: true
+  - type: textarea
+    id: desc
+    attributes:
+      label: 问题描述
+      description: 发生了什么？你预期是什么？复现步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: miclog
+    attributes:
+      label: 渲染层日志
+      description: "Windows: `%TEMP%\\oc-mic-debug.log`；macOS: `$TMPDIR/oc-mic-debug.log`（可只贴最后 50 行）"
+      render: text
+  - type: textarea
+    id: sttlog
+    attributes:
+      label: 识别服务日志
+      description: "`~/.config/opencode/whisper/stt_server.log` 尾部"
+      render: text
