@@ -205,6 +205,7 @@ macOS 版会自动：往 Info.plist 加麦克风权限声明 → 检查并关闭
 |---|---|---|
 | `OPENCODE_STT_LOCAL_PORT` | 47832 | 本地识别服务端口 |
 | `OPENCODE_STT_DEVICE` | auto | `auto` / `cuda` / `cpu` |
+| `OPENCODE_STT_BEAM` | 5 | 解码宽度（设为 1 可略提速，但中文标点质量会下降） |
 | `OPENCODE_STT_THREADS` | 16 (Win) / 8 (mac) | CPU 线程数 |
 | `OPENCODE_WHISPER_MODEL_DIR` | `~/.config/opencode/whisper-models/large-v3-turbo` | 模型目录 |
 | `OPENCODE_WHISPER_IDLE_SEC` | 1800 | 服务空闲自动退出秒数 |

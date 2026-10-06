@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODEL="large-v3-turbo"
+MODEL="auto"
 PYPI="https://pypi.tuna.tsinghua.edu.cn/simple"
 APPLY=1
 
@@ -13,11 +13,21 @@ while [ $# -gt 0 ]; do
     --pypi)     PYPI="$2"; shift 2 ;;
     --no-apply) APPLY=0; shift ;;
     -h|--help)
-      echo "usage: ./install.sh [--model large-v3-turbo|medium|small] [--pypi <index-url>] [--no-apply]"
+      echo "usage: ./install.sh [--model auto|large-v3-turbo|medium|small] [--pypi <index-url>] [--no-apply]"
       exit 0 ;;
     *) echo "unknown argument: $1"; exit 1 ;;
   esac
 done
+
+ARCH="$(uname -m)"
+if [ "$MODEL" = "auto" ]; then
+  if [ "$ARCH" = "arm64" ]; then
+    MODEL="large-v3-turbo"
+  else
+    MODEL="medium"
+  fi
+  echo "[install] 自动选型: $MODEL（架构 $ARCH；Intel Mac 默认 medium，可用 --model small 再降一档）"
+fi
 
 BASE="$HOME/.config/opencode"
 VENV="$BASE/whisper-venv"

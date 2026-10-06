@@ -1,6 +1,6 @@
 ﻿param(
-  [ValidateSet("large-v3-turbo", "medium", "small")]
-  [string]$Model = "large-v3-turbo",
+  [ValidateSet("auto", "large-v3-turbo", "medium", "small")]
+  [string]$Model = "auto",
   [switch]$Cpu,
   [switch]$SkipDeps,
   [switch]$SkipModel,
@@ -17,7 +17,6 @@ function Fail($m) { Write-Host "[install] $m" -ForegroundColor Red; exit 1 }
 $Base       = Join-Path $env:USERPROFILE ".config\opencode"
 $Venv       = Join-Path $Base "whisper-venv"
 $WhisperDir = Join-Path $Base "whisper"
-$ModelDir   = Join-Path $Base ("whisper-models\" + $Model)
 $VenvPy     = Join-Path $Venv "Scripts\python.exe"
 $Mirror     = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
@@ -26,6 +25,29 @@ $Repos = @{
   "medium"         = "Systran/faster-whisper-medium"
   "small"          = "Systran/faster-whisper-small"
 }
+
+# ---- 硬件探测：有无 NVIDIA 显卡 / 逻辑核数 ----
+$hasNvidia = $false
+$cores = 4
+try {
+  $gpus = Get-CimInstance Win32_VideoController -ErrorAction Stop
+  if ($gpus | Where-Object { $_.Name -match "NVIDIA" }) { $hasNvidia = $true }
+} catch { }
+try {
+  $cores = [int](Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property NumberOfLogicalProcessors -Maximum).Maximum
+} catch { }
+
+if ($Model -eq "auto") {
+  if ($hasNvidia) {
+    $Model = "large-v3-turbo"
+  } elseif ($cores -ge 8) {
+    $Model = "medium"
+  } else {
+    $Model = "small"
+  }
+  Info ("自动选型: {0}（NVIDIA={1}, 逻辑核数={2}）" -f $Model, $hasNvidia, $cores)
+}
+$ModelDir = Join-Path $Base ("whisper-models\" + $Model)
 
 Info "环境检查 ..."
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail "未找到 Python。请先安装 Python 3.10+。" }
@@ -38,9 +60,11 @@ if (-not $SkipDeps) {
   }
   Info "安装 faster-whisper ..."
   & $VenvPy -m pip install -q --disable-pip-version-check -i $Mirror faster-whisper
-  if (-not $Cpu) {
+  if (-not $Cpu -and $hasNvidia) {
     Info "安装 CUDA 运行库 (cuBLAS / cuDNN) ..."
     & $VenvPy -m pip install -q --disable-pip-version-check -i $Mirror nvidia-cublas-cu12 nvidia-cudnn-cu12
+  } elseif (-not $Cpu) {
+    Warn "未检测到 NVIDIA 显卡，跳过 CUDA 库（省约 1.3GB 下载），识别将走 CPU"
   } else {
     Warn "CPU 模式：不安装 CUDA 运行库（识别会慢一些）"
   }

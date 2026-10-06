@@ -51,6 +51,7 @@ MODEL_DIR = os.environ.get("OPENCODE_WHISPER_MODEL_DIR") or os.path.join(
 IDLE_TIMEOUT_SEC = int(os.environ.get("OPENCODE_WHISPER_IDLE_SEC") or "1800")
 _last_request = time.time()
 _model = None
+_model_device = None
 _lock = threading.Lock()
 
 
@@ -107,7 +108,7 @@ def normalize_punctuation(text):
 
 
 def get_model():
-    global _model
+    global _model, _model_device
     with _lock:
         if _model is None:
             has_cuda_libs = setup_cuda_dlls()
@@ -134,6 +135,7 @@ def get_model():
                     t0 = time.time()
                     kwargs = {"cpu_threads": threads} if device == "cpu" else {}
                     _model = WhisperModel(MODEL_DIR, device=device, compute_type=compute, **kwargs)
+                    _model_device = device
                     log("model loaded in %.1fs on %s" % (time.time() - t0, device))
                     break
                 except Exception as exc:
@@ -200,12 +202,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 t0 = time.time()
                 audio = read_wav16k(path)
+                beam = int(os.environ.get("OPENCODE_STT_BEAM") or "5")
                 segments, info = get_model().transcribe(
                     audio,
                     language=None,
-                    beam_size=5,
+                    beam_size=beam,
                     vad_filter=True,
                     condition_on_previous_text=False,
+                    without_timestamps=True,
                 )
                 text = "".join(s.text for s in segments).strip()
                 lang = getattr(info, "language", None)
@@ -214,9 +218,10 @@ class Handler(BaseHTTPRequestHandler):
                         retry_segments, _retry_info = get_model().transcribe(
                             audio,
                             language="zh",
-                            beam_size=5,
+                            beam_size=beam,
                             vad_filter=True,
                             condition_on_previous_text=False,
+                            without_timestamps=True,
                             initial_prompt=_PUNCT_PROMPT,
                         )
                         retry_text = "".join(s.text for s in retry_segments).strip()
