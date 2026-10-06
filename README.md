@@ -56,10 +56,10 @@
 ## 效果
 
 <p align="center">
-  <img src="docs/assets/composer-mock.svg" alt="麦克风按钮位于发送键左侧" width="720">
+  <img src="docs/assets/composer-mock.svg" alt="录音界面：波形、计时、取消 / 停止按钮" width="720">
 </p>
 
-> 示意图（实际界面自适应 OpenCode 深色 / 浅色主题）
+> 示意图：点击麦克风后进入录音状态（波形 + 计时 + 停止），实际界面自适应深色 / 浅色主题
 
 - 点 🎤 开始录音：图标变红、呼吸闪烁
 - 说完再点一下（或满 60 秒自动结束）
