@@ -38,14 +38,14 @@ try {
 } catch { }
 
 if ($Model -eq "auto") {
-  if ($hasNvidia) {
+  if ($hasNvidia -and -not $Cpu) {
     $Model = "large-v3-turbo"
   } elseif ($cores -ge 8) {
     $Model = "medium"
   } else {
     $Model = "small"
   }
-  Info ("自动选型: {0}（NVIDIA={1}, 逻辑核数={2}）" -f $Model, $hasNvidia, $cores)
+  Info ("自动选型: {0}（NVIDIA={1}, 强制CPU={2}, 逻辑核数={3}）" -f $Model, $hasNvidia, [bool]$Cpu, $cores)
 }
 $ModelDir = Join-Path $Base ("whisper-models\" + $Model)
 
