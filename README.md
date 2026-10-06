@@ -11,11 +11,12 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
   <a href="#快速开始"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-0078D6.svg?style=for-the-badge" alt="Platform"></a>
-  <a href="VERSION"><img src="https://img.shields.io/badge/Version-v0.1.2-orange.svg?style=for-the-badge" alt="Version"></a>
+  <a href="https://github.com/ForrestKang/opencode-local-voice/releases/latest"><img src="https://img.shields.io/github/v/release/ForrestKang/opencode-local-voice?style=for-the-badge&label=version&color=orange" alt="Latest release"></a>
+  <a href="https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ForrestKang/opencode-local-voice/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> · <a href="#特性">特性</a> · <a href="#工作原理">工作原理</a> · <a href="#常见问题">常见问题</a> · <a href="#卸载">卸载</a> · <a href="CHANGELOG.md">更新日志</a>
+  <a href="#快速开始">快速开始</a> · <a href="#特性">特性</a> · <a href="#工作原理">工作原理</a> · <a href="#常见问题">常见问题</a> · <a href="#卸载">卸载</a> · <a href="docs/README_en.md">English</a> · <a href="CHANGELOG.md">更新日志</a>
 </p>
 
 ---
