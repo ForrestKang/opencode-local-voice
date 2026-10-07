@@ -1,0 +1,4 @@
+# Optional faster-whisper GPU runtime for CUDA 12.x and cuDNN 9.
+# Install only on CUDA-capable Windows systems after the base requirements.
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51

@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "publicVersion": "0.2.0",
+  "status": "tested-release-candidate",
+  "generatedAt": "2026-10-07T15:07:25.170915+08:00",
+  "testedHost": {
+    "os": "Windows",
+    "arch": "x64",
+    "nativeAsarSourceVersion": "1.18.34",
+    "electronRuntime": "44.6.0"
+  },
+  "tests": {
+    "node": {
+      "pass": 106,
+      "fail": 0,
+      "skip": 0,
+      "evidence": "test-results/node-v0.2.0.txt"
+    },
+    "python": {
+      "pass": 57,
+      "fail": 0,
+      "evidence": "test-results/python-v0.2.0.txt"
+    },
+    "voiceUi": {
+      "pass": 29,
+      "fail": 0,
+      "syntheticAudio": true,
+      "realMicrophone": false,
+      "evidence": "test-results/ui-report.json"
+    },
+    "nativeSettingsUi": {
+      "pass": 24,
+      "fail": 0,
+      "realNativeComponents": true,
+      "isolatedHost": true,
+      "evidence": "test-results/native-settings-report.json"
+    },
+    "electronUpdaterRuntime": {
+      "pass": 13,
+      "fail": 0,
+      "realElectron": true,
+      "realOpenCodeWindow": false,
+      "evidence": "test-results/electron-update-runtime.json",
+      "facts": {
+        "legacyVirtualRegularProbe": true,
+        "legacyFindAsarResult": null,
+        "fixedPhysicalRegularProbe": true,
+        "rawHashMatches": true,
+        "defaultFilesystemSelection": true,
+        "missingAttempts": 3,
+        "missingNoticesCaptured": 3,
+        "missingErrorsNotified": 3,
+        "missingUnhandledRejections": 0,
+        "retryAfterActiveConfigRestore": true,
+        "installerExecuted": false,
+        "patchedTrace": [
+          "prepare:1.2.4",
+          "stop",
+          "commit",
+          "official-update",
+          "cancel"
+        ]
+      }
+    },
+    "macosSimulation": {
+      "pass": 17,
+      "fail": 0,
+      "host": "Windows Git Bash",
+      "realMac": false,
+      "includedInNodeSuite": true,
+      "evidence": "test-results/macos-release-simulation.json"
+    },
+    "sourceSyntax": {
+      "javascriptFiles": 42,
+      "powershellFiles": 11,
+      "bashFiles": 6,
+      "typescript": "PASS",
+      "ciYaml": "PASS"
+    },
+    "windowsInstallPreflight": {
+      "status": "PASS",
+      "applicationModified": false
+    }
+  },
+  "windowsCandidate": {
+    "appVersion": "1.18.34",
+    "sourceAsarSha256": "b503e3dbd6c9941ba4ec0efc835978cacd20b375ac46551da1f04018d2a173fd",
+    "candidateAsarSha256": "90c7b78dc476f2e8207a423da25919b26886d8c83302459745f5ee4b9a8bc72d",
+    "sourceUnchanged": true,
+    "idempotent": true,
+    "packedFiles": 6953,
+    "integrityHashedFiles": 6953,
+    "productionUpdateBridgeReadback": true,
+    "originalFs": true,
+    "globalNoAsar": false
+  },
+  "localWindowsInstall": {
+    "status": "PASS",
+    "appVersion": "1.18.34",
+    "featureVersion": "0.2.0",
+    "asarSha256": "90c7b78dc476f2e8207a423da25919b26886d8c83302459745f5ee4b9a8bc72d",
+    "maintenanceCheck": "PASS",
+    "restoreDryRun": "PASS",
+    "startup": {
+      "mainWindowResponsive": true,
+      "voiceScriptLoaded": true,
+      "syntaxError": false,
+      "toolbarMountObserved": false,
+      "backendReachable": true,
+      "officialUpdaterExecuted": false
+    },
+    "officialUpdaterExecuted": false
+  },
+  "observedLiveWindowsUpdate": {
+    "schema": 1,
+    "status": "PASS-observed-live-update",
+    "observedAt": "2026-10-07T07:05:39.981Z",
+    "trigger": "Observed user environment; assistant did not invoke the official updater or microphone",
+    "appVersionBefore": "1.18.34",
+    "appVersionAfter": "1.18.35",
+    "featureVersionAfter": "0.2.0",
+    "requestTarget": "1.18.35",
+    "helperReady": true,
+    "handoffCommitted": true,
+    "installerProcessEvidenceCount": 1,
+    "recoveryApplied": true,
+    "maintenanceCheckComplete": true,
+    "officialNewArchiveSha256": "aaa772c154f6ca3a604052ae4a15b63303883cb9a6ee0573be0bc9acedb31a39",
+    "patchedNewArchiveSha256": "8595b6457b09b2013cc2030ea236b9439ed718c5b3e9adfe23041c33d0a9fa8b",
+    "voiceScriptLoaded": true,
+    "toolbarMounted": true,
+    "recordingStartObserved": true,
+    "draftInsertionObserved": true,
+    "modelAccuracyAssessed": false,
+    "audioOrTranscriptExported": false,
+    "restoreAfterUpdateDryRun": "PASS",
+    "matchingFeatureBackup": "v0.2.0-ca2WWR",
+    "old11834RestoreAllowed": false,
+    "limits": [
+      "One actual Windows update does not prove future releases or administrator installers",
+      "Observed microphone/draft events do not assess transcription accuracy or latency",
+      "macOS remains Windows-hosted simulation"
+    ]
+  },
+  "controls": {
+    "cancel": "Esc or visible cancel button",
+    "finishRecording": "Enter or visible stop button",
+    "space": "original input behavior",
+    "forceStop": "owned recognition worker only; no OpenCode process-kill button",
+    "backendAlreadyExited": "cancel never starts another daemon"
+  },
+  "notVerified": [
+    "Future OpenCode versions and administrator update installers",
+    "Microphone/physical driver combinations, model accuracy, cold/hot latency, GPU and external AI",
+    "Real macOS kernel, bundle permissions, signatures, notarization, Gatekeeper, Metal and official update",
+    "Real Linux desktop runtime"
+  ],
+  "recoveryLimits": [
+    "Windows repair supports verified native layouts and user-level installers only",
+    "Unknown layouts or incompatible restore transactions are refused",
+    "macOS official update requires manual compatible reapply",
+    "Forced process exit or power loss does not recover unsent audio"
+  ],
+  "publication": {
+    "pushed": false,
+    "published": false,
+    "awaitsUserReview": true,
+    "archiveHashes": "distributed separately in SHA256SUMS.txt",
+    "evidenceScope": "Previous candidate preparation only; this field is not the current repository push status."
+  },
+  "evidenceNote": "Raw logs are local generated test outputs and are not bundled with user files or application binaries. Mac simulation counts overlap the Node suite and must not be added as independent Node test cases.",
+  "evidenceScope": "previous-candidate-before-repository-audit",
+  "currentAuditReport": "docs/repository-audit-results-v0.2.0.json"
+}

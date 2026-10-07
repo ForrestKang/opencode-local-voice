@@ -1,444 +1,121 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { spawn } from "child_process"
-import { readFileSync, writeFileSync, unlinkSync, existsSync } from "fs"
-import { tmpdir, homedir } from "os"
-import { join } from "path"
+import { spawn } from "node:child_process"
+import { createRequire } from "node:module"
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { randomUUID } from "node:crypto"
 
-const BASE_URL =
-  process.env.OPENCODE_STT_BASE_URL ??
-  process.env.OPENAI_BASE_URL ??
-  "https://api.siliconflow.cn/v1"
-const API_KEY =
-  process.env.OPENCODE_STT_API_KEY ??
-  process.env.SILICONFLOW_API_KEY ??
-  process.env.OPENAI_API_KEY
-const MODEL = process.env.OPENCODE_STT_MODEL ?? "FunAudioLLM/SenseVoiceSmall"
-const LANGUAGE = process.env.OPENCODE_STT_LANGUAGE
-const FFMPEG = process.env.OPENCODE_STT_FFMPEG ?? "ffmpeg"
-const MAX_SECONDS = Number(process.env.OPENCODE_STT_MAX_SECONDS ?? "30")
-const SILENCE_SECONDS = Number(process.env.OPENCODE_STT_SILENCE_SECONDS ?? "2.5")
-const NOISE_DB = process.env.OPENCODE_STT_NOISE_DB ?? "-30"
-const PORT = Number(process.env.OPENCODE_STT_PORT ?? "47831")
-const BACKEND = (process.env.OPENCODE_STT_BACKEND ?? "local").toLowerCase()
-const LOCAL_PORT = Number(process.env.OPENCODE_STT_LOCAL_PORT ?? "47832")
-const VENV_PY = join(homedir(), ".config", "opencode", "whisper-venv", "Scripts", "python.exe")
-const SERVER_PY = join(homedir(), ".config", "opencode", "whisper", "stt_server.py")
-const STATE_FILE = join(homedir(), ".config", "opencode", "voice-input-state.json")
+const require = createRequire(import.meta.url)
+const base = join(homedir(), ".config", "opencode")
+const voiceHome = process.env.OPENCODE_VOICE_HOME || join(base, "local-voice")
+const stateFile = join(voiceHome, "tui-state.json")
+const ffmpeg = process.env.OPENCODE_STT_FFMPEG || "ffmpeg"
+const bridgeFile = process.env.OPENCODE_VOICE_BRIDGE || join(base, "whisper", "desktop-bridge.cjs")
 
-type SttAction = "record" | "on" | "off" | "toggle" | "status"
-
-let stateCache: { enabled: boolean } | null = null
-
-function readState(): { enabled: boolean } {
-  if (stateCache) return stateCache
-  try {
-    const parsed = JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-    stateCache = { enabled: parsed?.enabled !== false }
-  } catch {
-    stateCache = { enabled: true }
-  }
-  return stateCache
+function enabled(): boolean {
+  try { return JSON.parse(readFileSync(stateFile, "utf8")).enabled !== false } catch { return true }
 }
-
-function writeState(enabled: boolean) {
-  stateCache = { enabled }
-  try {
-    writeFileSync(STATE_FILE, JSON.stringify({ enabled }, null, 2), "utf-8")
-  } catch (e) {
-    console.warn("[voice-input] failed to persist state:", e)
-  }
+function setEnabled(value: boolean) {
+  mkdirSync(voiceHome, { recursive: true, mode: 0o700 })
+  const temporary = stateFile + "." + randomUUID() + ".tmp"
+  writeFileSync(temporary, JSON.stringify({ enabled: value }) + "\n", { mode: 0o600 })
+  renameSync(temporary, stateFile)
 }
-
-function run(cmd: string, args: string[]): Promise<{ code: number; out: string }> {
+function run(args: string[], seconds: number, signal?: AbortSignal): Promise<{ output: Buffer; error: string; code: number }> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args)
-    let out = ""
-    p.stdout.on("data", (d) => (out += d.toString()))
-    p.stderr.on("data", (d) => (out += d.toString()))
-    p.on("error", reject)
-    p.on("close", (code) => resolve({ code: code ?? -1, out }))
-  })
-}
-
-let cachedDevice: string | null = null
-
-async function findMic(): Promise<string> {
-  if (process.env.OPENCODE_STT_MIC) return process.env.OPENCODE_STT_MIC
-  if (cachedDevice) return cachedDevice
-  const { out } = await run(FFMPEG, [
-    "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy",
-  ])
-  const devices: { name: string; alt?: string }[] = []
-  for (const line of out.split(/\r?\n/)) {
-    const friendly = /"([^"]+)"\s+\(audio\)/.exec(line)
-    if (friendly) {
-      devices.push({ name: friendly[1] })
-      continue
+    const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] })
+    const chunks: Buffer[] = []; let size = 0, error = "", done = false
+    const finish = (failure?: Error, code = 0) => {
+      if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener("abort", abort)
+      if (failure) reject(failure); else resolve({ output: Buffer.concat(chunks), error, code })
     }
-    const alt = /Alternative name "([^"]+)"/.exec(line)
-    if (alt && devices.length > 0) devices[devices.length - 1].alt = alt[1]
-  }
-  if (devices.length === 0) {
-    throw new Error(
-      "No DirectShow audio input device found. Set OPENCODE_STT_MIC (e.g. the microphone name from `ffmpeg -list_devices true -f dshow -i dummy`)."
-    )
-  }
-  const first = devices[0]
-  cachedDevice = first.alt ?? first.name
-  return cachedDevice
-}
-
-async function record(): Promise<string> {
-  const mic = await findMic()
-  const file = join(tmpdir(), `opencode-voice-${Date.now()}.wav`)
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(FFMPEG, [
-      "-hide_banner", "-y", "-stdin",
-      "-f", "dshow", "-i", `audio=${mic}`,
-      "-t", String(MAX_SECONDS),
-      "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-      "-af", `silencedetect=noise=${NOISE_DB}dB:d=${SILENCE_SECONDS}`,
-      file,
-    ], { stdio: ["pipe", "ignore", "pipe"] })
-
-    let err = ""
-    let quitSent = false
-    let quitTimer: NodeJS.Timeout | null = null
-    const started = Date.now()
-
-    const quit = () => {
-      if (quitSent) return
-      quitSent = true
-      try {
-        proc.stdin.write("q\n")
-      } catch {
-        // ignore
-      }
-    }
-
-    const watchdog = setTimeout(() => {
-      try {
-        proc.kill()
-      } catch {
-        // ignore
-      }
-    }, (MAX_SECONDS + 10) * 1000)
-
-    proc.stderr.on("data", (d) => {
-      const chunk = d.toString()
-      err = (err + chunk).slice(-4000)
-      for (const line of chunk.split(/\r?\n/)) {
-        if (/silence_start:/.test(line) && !quitSent) {
-          if (quitTimer) clearTimeout(quitTimer)
-          quitTimer = setTimeout(() => {
-            if (Date.now() - started >= 1500) quit()
-          }, 700)
-        }
-        if (/silence_end:/.test(line) && quitTimer) {
-          clearTimeout(quitTimer)
-          quitTimer = null
-        }
-      }
+    const abort = () => { proc.kill(); finish(new Error("Voice input cancelled")) }
+    const timer = setTimeout(() => { proc.kill(); finish(new Error("Microphone capture timed out")) }, (seconds + 15) * 1000)
+    proc.on("error", err => finish(new Error("FFmpeg failed to start: " + err.message)))
+    signal?.addEventListener("abort", abort, { once: true })
+    if (signal?.aborted) { abort(); return }
+    proc.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length
+      if (size > 10 * 1024 * 1024) { proc.kill(); finish(new Error("Recording exceeds the audio limit")) } else chunks.push(chunk)
     })
-
-    proc.on("error", () => {
-      clearTimeout(watchdog)
-      if (quitTimer) clearTimeout(quitTimer)
-      reject(
-        new Error(
-          `ffmpeg not found. Install ffmpeg and make sure it is on PATH, or set OPENCODE_STT_FFMPEG. (${FFMPEG})`
-        )
-      )
-    })
-
-    proc.on("close", (code) => {
-      clearTimeout(watchdog)
-      if (quitTimer) clearTimeout(quitTimer)
-      if (code === 0) resolve(file)
-      else reject(new Error(`recording failed (exit ${code}): ${err.slice(-400)}`))
-    })
+    proc.stderr.on("data", (chunk: Buffer) => { error = (error + chunk.toString()).slice(-6000) })
+    proc.on("close", code => finish(undefined, code ?? -1))
   })
 }
-
-async function transcribeCloud(file: string): Promise<string> {
-  const buf = readFileSync(file)
-  const form = new FormData()
-  form.append("file", new File([buf], file.split(/[\\/]/).pop() ?? "audio.wav", { type: "audio/wav" }))
-  form.append("model", MODEL)
-  if (LANGUAGE) form.append("language", LANGUAGE)
-  const res = await fetch(`${BASE_URL.replace(/\/+$/, "")}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${API_KEY}` },
-    body: form,
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`STT API ${res.status}: ${text.slice(0, 300)}`)
-  try {
-    const json = JSON.parse(text)
-    return typeof json.text === "string" ? json.text : text
-  } catch {
-    return text
-  }
-}
-
-async function ensureLocalServer(): Promise<void> {
-  try {
-    const r = await fetch(`http://127.0.0.1:${LOCAL_PORT}/health`)
-    if (r.ok) return
-  } catch {
-    // not running yet
-  }
-  const g = globalThis as any
-  try {
-    if (!g.__ocSttLocalProc || g.__ocSttLocalProc.exitCode !== null) {
-      const proc = spawn(VENV_PY, [SERVER_PY, String(LOCAL_PORT)], {
-        windowsHide: true,
-        stdio: ["ignore", "ignore", "pipe"],
-      })
-      g.__ocSttLocalProc = proc
-      proc.stderr?.on("data", (d) => {
-        const line = String(d).trim()
-        if (line) console.warn("[voice-input] local stt:", line.slice(0, 300))
-      })
-      proc.on("exit", () => {
-        if (g.__ocSttLocalProc === proc) g.__ocSttLocalProc = null
-      })
+async function inputArgs(mic?: string, signal?: AbortSignal): Promise<string[]> {
+  if (process.platform === "win32") {
+    let device = mic || process.env.OPENCODE_STT_MIC
+    if (!device) {
+      const listed = await run(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], 5, signal)
+      device = /"([^"]+)"\s+\(audio\)/.exec(listed.error)?.[1]
     }
-  } catch (e) {
-    throw new Error(`failed to start local whisper server: ${e instanceof Error ? e.message : String(e)}`)
+    if (!device) throw new Error("No microphone found. Specify the DirectShow microphone name with mic.")
+    return ["-f", "dshow", "-i", device.startsWith("audio=") ? device : "audio=" + device]
   }
-  const deadline = Date.now() + 120000
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 500))
-    try {
-      const r = await fetch(`http://127.0.0.1:${LOCAL_PORT}/health`)
-      if (r.ok) return
-    } catch {
-      // keep waiting
-    }
+  if (process.platform === "darwin") {
+    const device = mic || process.env.OPENCODE_STT_MIC || "0"
+    return ["-f", "avfoundation", "-i", device.startsWith(":") ? device : ":" + device]
   }
-  throw new Error("local whisper server did not become ready in time (check opencode logs)")
+  if (process.platform === "linux") return ["-f", "pulse", "-i", mic || process.env.OPENCODE_STT_MIC || "default"]
+  throw new Error("This microphone platform is not supported")
+}
+function pcmWav(pcm: Buffer): Buffer {
+  if (!pcm.length || pcm.length % 2) throw new Error("No valid microphone samples")
+  const header = Buffer.alloc(44)
+  header.write("RIFF", 0); header.writeUInt32LE(pcm.length + 36, 4); header.write("WAVEfmt ", 8)
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22)
+  header.writeUInt32LE(16000, 24); header.writeUInt32LE(32000, 28); header.writeUInt16LE(2, 32)
+  header.writeUInt16LE(16, 34); header.write("data", 36); header.writeUInt32LE(pcm.length, 40)
+  return Buffer.concat([header, pcm])
 }
 
-async function transcribeLocal(file: string): Promise<string> {
-  await ensureLocalServer()
-  const buf = readFileSync(file)
-  const res = await fetch(`http://127.0.0.1:${LOCAL_PORT}/inference`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      "x-language": (LANGUAGE || "zh").toLowerCase(),
-    },
-    body: new Uint8Array(buf),
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`local STT ${res.status}: ${text.slice(0, 300)}`)
-  try {
-    const json = JSON.parse(text)
-    return typeof json.text === "string" ? json.text : ""
-  } catch {
-    return text
-  }
-}
-
-async function transcribeFile(file: string): Promise<string> {
-  return BACKEND === "cloud" ? transcribeCloud(file) : transcribeLocal(file)
-}
-
-function localConfigured(): boolean {
-  return existsSync(VENV_PY) && existsSync(SERVER_PY)
-}
-
-function extFromMime(type: string | null): string {
-  const t = (type ?? "").toLowerCase()
-  if (t.includes("wav")) return "wav"
-  if (t.includes("ogg")) return "ogg"
-  if (t.includes("mp4") || t.includes("m4a") || t.includes("aac")) return "m4a"
-  if (t.includes("mpeg") || t.includes("mp3")) return "mp3"
-  return "webm"
-}
-
-function saveTemp(data: ArrayBuffer, ext: string): string {
-  const file = join(tmpdir(), `opencode-stt-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`)
-  writeFileSync(file, Buffer.from(data))
-  return file
-}
-
-function toWav16k(input: string): Promise<string> {
-  if (input.toLowerCase().endsWith(".wav")) return Promise.resolve(input)
-  const output = input.replace(/\.[^.]+$/, "") + ".wav"
-  return new Promise((resolve, reject) => {
-    const p = spawn(FFMPEG, [
-      "-hide_banner", "-y", "-i", input,
-      "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-      output,
-    ])
-    let err = ""
-    p.stderr.on("data", (d) => (err += d.toString()))
-    p.on("error", reject)
-    p.on("close", (code) =>
-      code === 0 ? resolve(output) : reject(new Error(`ffmpeg convert failed (${code}): ${err.slice(-300)}`))
-    )
-  })
-}
-
-function tryUnlink(file: string | null) {
-  if (!file) return
-  try {
-    unlinkSync(file)
-  } catch {
-    // ignore
-  }
-}
-
-function startBridge() {
-  const g = globalThis as any
-  if (g.__ocVoiceSttBridge) return
-  const B = g.Bun
-  if (!B || typeof B.serve !== "function") {
-    console.warn("[voice-input] Bun.serve not available, mic button bridge disabled")
-    return
-  }
-  try {
-    const server = B.serve({
-      hostname: "127.0.0.1",
-      port: PORT,
-      async fetch(req: Request) {
-        const cors: Record<string, string> = {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Private-Network": "true",
-        }
-        const json = (obj: unknown, status = 200) =>
-          new Response(JSON.stringify(obj), {
-            status,
-            headers: { ...cors, "Content-Type": "application/json" },
-          })
-        if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors })
-        let url: URL
-        try {
-          url = new URL(req.url)
-        } catch {
-          return json({ error: "bad url" }, 400)
-        }
-        if (req.method !== "POST" || url.pathname !== "/transcribe") {
-          return json({ error: "not found" }, 404)
-        }
-        let input: string | null = null
-        let converted: string | null = null
-        try {
-          if (BACKEND === "cloud" && !API_KEY) {
-            return json({ error: "STT API key not set (OPENCODE_STT_API_KEY)" }, 500)
-          }
-          if (BACKEND === "local" && !localConfigured()) {
-            return json({ error: "local whisper is not installed" }, 500)
-          }
-          const ct = (req.headers.get("content-type") ?? "").toLowerCase()
-          if (ct.startsWith("multipart/form-data")) {
-            const form = await req.formData()
-            const blob = form.get("file")
-            if (!(blob instanceof Blob)) return json({ error: "missing file field" }, 400)
-            input = saveTemp(await blob.arrayBuffer(), extFromMime(blob.type))
-          } else {
-            input = saveTemp(await req.arrayBuffer(), extFromMime(req.headers.get("content-type")))
-          }
-          converted = await toWav16k(input)
-          const text = await transcribeFile(converted)
-          return json({ text })
-        } catch (e) {
-          return json({ error: e instanceof Error ? e.message : String(e) }, 500)
-        } finally {
-          tryUnlink(input)
-          if (converted !== input) tryUnlink(converted)
-        }
+export default (async ctx => ({
+  tool: {
+    voice_input: tool({
+      description: "Record local microphone audio only when the user explicitly asks to dictate. Transcribe locally and append to the TUI draft without submitting. on/off/toggle/status never record. Uses the same installed local service and configuration as Desktop/Web.",
+      args: {
+        action: tool.schema.enum(["record", "on", "off", "toggle", "status"]).optional().default("record"),
+        seconds: tool.schema.number().int().min(1).max(300).optional().default(30),
+        mic: tool.schema.string().optional().describe("Windows DirectShow name, macOS audio index, or Linux PulseAudio source"),
       },
-    })
-    g.__ocVoiceSttBridge = server
-    console.log(`[voice-input] STT bridge listening on http://127.0.0.1:${PORT}`)
-  } catch (e) {
-    console.warn("[voice-input] failed to start STT bridge:", e)
-  }
-}
-
-export default (async (ctx) => {
-  startBridge()
-  const toast = async (title: string, description: string, severity: "success" | "info" | "error") => {
-    try {
-      await ctx.client.tui.publish({
-        body: { type: "toast", toast: { title, description, severity } } as any,
-      })
-    } catch {
-      // ignore
-    }
-  }
-  const describe = () => (readState().enabled ? "ON" : "OFF")
-  return {
-    tool: {
-      voice_input: tool({
-        description:
-          "Record audio from the user's microphone and transcribe it to text (speech-to-text). " +
-          "Use this when the user asks to speak, dictate, or says something like 语音输入 / 听我说 / 用语音说. " +
-          "Pass action='on'/'off'/'toggle'/'status' to control voice input instead of recording. " +
-          "Never auto-record on your own initiative — only record when the user explicitly asks.",
-        args: {
-          action: tool.schema
-            .enum(["record", "on", "off", "toggle", "status"])
-            .describe("Defaults to 'record'. Use on/off/toggle/status to control voice input."),
-        },
-        async execute({ action }: { action?: SttAction }) {
-          const act: SttAction = action ?? "record"
-
-          if (act === "status") {
-            return `voice_input is ${describe()}.`
-          }
-          if (act === "on") {
-            writeState(true)
-            await toast("Voice Input ON", "麦克风语音输入已开启", "success")
-            return "voice_input enabled. Recording on the next explicit request."
-          }
-          if (act === "off") {
-            writeState(false)
-            await toast("Voice Input OFF", "麦克风语音输入已关闭", "info")
-            return "voice_input disabled. Recording will be refused until turned back on."
-          }
-          if (act === "toggle") {
-            const next = !readState().enabled
-            writeState(next)
-            await toast(
-              next ? "Voice Input ON" : "Voice Input OFF",
-              next ? "麦克风语音输入已开启" : "麦克风语音输入已关闭",
-              next ? "success" : "info",
-            )
-            return `voice_input toggled ${next ? "on" : "off"}.`
-          }
-
-          if (!readState().enabled) {
-            return "voice_input is currently disabled, so nothing was recorded. Turn it on with voice_input(action='on')."
-          }
-          if (BACKEND === "cloud" && !API_KEY) {
-            return "voice_input error: cloud STT API key not set. Set OPENCODE_STT_API_KEY or switch OPENCODE_STT_BACKEND=local."
-          }
-          if (BACKEND === "local" && !localConfigured()) {
-            return `voice_input error: local whisper is not installed (expected ${SERVER_PY}).`
-          }
-          let file: string | null = null
-          try {
-            file = await record()
-            const text = await transcribeFile(file)
-            if (!text || !text.trim()) {
-              return "No speech detected. Please try again and speak clearly."
-            }
-            return `Transcribed speech: "${text.trim()}"`
-          } catch (e) {
-            return `voice_input failed: ${e instanceof Error ? e.message : String(e)}`
-          } finally {
-            tryUnlink(file)
-          }
-        },
-      }),
-    },
-  }
-}) satisfies Plugin
+      async execute({ action, seconds, mic }, context) {
+        if (action === "on" || action === "off" || action === "toggle") {
+          setEnabled(action === "on" || (action === "toggle" && !enabled()))
+          return "Voice input " + (enabled() ? "enabled" : "disabled")
+        }
+        if (!enabled() && action === "record") return "Voice input is disabled. Enable it before recording."
+        let client: any, id = randomUUID(), submitted = false, transcript = ""
+        const cancel = () => { if (client && submitted) client.cancel(id).catch(() => {}) }
+        try {
+          client = require(bridgeFile).createClient({ voiceHome })
+          if (action === "status") return JSON.stringify({ enabled: enabled(), service: await client.status() })
+          const config = await client.getConfig()
+          if (context.abort.aborted) return "Voice input cancelled"
+          if (seconds > config.max_seconds) return "Recording duration exceeds the configured maximum of " + config.max_seconds + " seconds."
+          context.abort.addEventListener("abort", cancel, { once: true })
+          if (config.warmup_on_record) client.warmup().catch(() => {})
+          const input = await inputArgs(mic, context.abort)
+          if (context.abort.aborted) return "Voice input cancelled"
+          const recorded = await run(["-nostdin", "-hide_banner", "-loglevel", "error", ...input,
+            "-t", String(seconds), "-vn", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-f", "s16le", "pipe:1"], seconds, context.abort)
+          if (recorded.code !== 0) throw new Error("Microphone capture failed: " + recorded.error.slice(-500))
+          if (context.abort.aborted) return "Voice input cancelled"
+          submitted = true
+          const result = await client.transcribe(pcmWav(recorded.output), "audio/wav", id)
+          if (context.abort.aborted) return "Voice input cancelled"
+          if (result.error) throw new Error(result.error)
+          if (!result.text?.trim()) return "No speech detected."
+          transcript = result.text
+          await ctx.client.tui.appendPrompt({ body: { text: transcript }, throwOnError: true })
+          return "Transcribed and appended to the draft. Review before sending: " + result.text
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          return transcript ? "Transcription succeeded but the draft could not be updated: " + detail + "\nCopy this text into your draft: " + transcript : "Voice input failed: " + detail
+        }
+        finally { context.abort.removeEventListener("abort", cancel) }
+      },
+    }),
+  },
+})) satisfies Plugin

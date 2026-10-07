@@ -1,122 +1,160 @@
-﻿param(
+param(
   [ValidateSet("auto", "large-v3-turbo", "medium", "small")]
   [string]$Model = "auto",
   [switch]$Cpu,
   [switch]$SkipDeps,
   [switch]$SkipModel,
-  [switch]$NoApply
+  [switch]$NoApply,
+  [switch]$DryRun,
+  [string]$AppPath,
+  [string]$Pypi = "https://pypi.tuna.tsinghua.edu.cn/simple"
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PlatformDir = $PSScriptRoot
+$Root = (Resolve-Path (Join-Path $PlatformDir "..")).Path
 
-function Info($m) { Write-Host "[install] $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "[install] $m" -ForegroundColor Yellow }
-function Fail($m) { Write-Host "[install] $m" -ForegroundColor Red; exit 1 }
-
-$Base       = Join-Path $env:USERPROFILE ".config\opencode"
-$Venv       = Join-Path $Base "whisper-venv"
-$WhisperDir = Join-Path $Base "whisper"
-$VenvPy     = Join-Path $Venv "Scripts\python.exe"
-$Mirror     = "https://pypi.tuna.tsinghua.edu.cn/simple"
-
-$Repos = @{
-  "large-v3-turbo" = "deepdml/faster-whisper-large-v3-turbo-ct2"
-  "medium"         = "Systran/faster-whisper-medium"
-  "small"          = "Systran/faster-whisper-small"
+function Info([string]$Message) { Write-Host "[install] $Message" -ForegroundColor Cyan }
+function Fail([string]$Message) { throw $Message }
+function Check-Native([string]$Operation) {
+  if ($LASTEXITCODE -ne 0) { Fail "$Operation failed (exit $LASTEXITCODE)." }
+}
+function Find-AppAsar([string]$App) {
+  $Candidate = Join-Path $App "resources\app.asar"
+  if (Test-Path -LiteralPath $Candidate -PathType Leaf) { return (Resolve-Path -LiteralPath $Candidate).Path }
+  $Alternate = @((Join-Path $App "app.asar"), (Join-Path $App "Contents\Resources\app.asar")) |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+  if ($Alternate.Count -gt 0) { Fail "Only AppPath\resources\app.asar is supported by the Windows maintenance workflow; found an unsupported app.asar layout." }
+  Fail "app.asar not found under $App. Pass -AppPath with the OpenCode installation directory."
 }
 
-# ---- 硬件探测：有无 NVIDIA 显卡 / 逻辑核数 ----
-$hasNvidia = $false
-$cores = 4
-try {
-  $gpus = Get-CimInstance Win32_VideoController -ErrorAction Stop
-  if ($gpus | Where-Object { $_.Name -match "NVIDIA" }) { $hasNvidia = $true }
-} catch { }
-try {
-  $cores = [int](Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property NumberOfLogicalProcessors -Maximum).Maximum
-} catch { }
+$Base = Join-Path $env:USERPROFILE ".config\opencode"
+$VoiceHome = if ($env:OPENCODE_VOICE_HOME) { $env:OPENCODE_VOICE_HOME } else { Join-Path $Base "local-voice" }
+$Venv = Join-Path $Base "whisper-venv"
+$VenvPy = Join-Path $Venv "Scripts\python.exe"
+$WhisperDir = Join-Path $Base "whisper"
+$Helper = Join-Path $Root "shared\install-support.py"
+$Requirements = Join-Path $Root "requirements.txt"
+$CudaRequirements = Join-Path $Root "requirements-cuda.txt"
+
+if (-not $AppPath) { $AppPath = $env:OPENCODE_APP_PATH }
+$NeedsDesktop = ($DryRun -or -not $NoApply)
+if (-not $AppPath -and $NeedsDesktop) { $AppPath = Join-Path $env:LOCALAPPDATA "Programs\@opencode-aidesktop" }
+if ($AppPath) { $AppPath = [IO.Path]::GetFullPath($AppPath) }
+if ($NeedsDesktop) {
+  if (-not (Test-Path -LiteralPath $AppPath -PathType Container)) { Fail "OpenCode desktop directory not found: $AppPath" }
+  $AppAsar = Find-AppAsar $AppPath
+}
 
 if ($Model -eq "auto") {
-  if ($hasNvidia -and -not $Cpu) {
-    $Model = "large-v3-turbo"
-  } elseif ($cores -ge 8) {
-    $Model = "medium"
-  } else {
-    $Model = "small"
-  }
-  Info ("自动选型: {0}（NVIDIA={1}, 强制CPU={2}, 逻辑核数={3}）" -f $Model, $hasNvidia, [bool]$Cpu, $cores)
+  $cores = 4
+  try { $cores = [int](Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property NumberOfLogicalProcessors -Maximum).Maximum } catch { }
+  if ($cores -ge 8) { $Model = "medium" } else { $Model = "small" }
+  Info ("automatic model: {0} ({1} logical cores)" -f $Model, $cores)
 }
-$ModelDir = Join-Path $Base ("whisper-models\" + $Model)
+$Repo = @{
+  "large-v3-turbo" = "deepdml/faster-whisper-large-v3-turbo-ct2"
+  "medium" = "Systran/faster-whisper-medium"
+  "small" = "Systran/faster-whisper-small"
+}[$Model]
+$ModelPath = Join-Path $VoiceHome ("models\faster-whisper-" + $Model)
+$Device = if ($Cpu) { "cpu" } else { "auto" }
 
-Info "环境检查 ..."
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail "未找到 Python。请先安装 Python 3.10+。" }
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail "未找到 Node.js（打补丁需要）。可执行: winget install OpenJS.NodeJS.LTS" }
+if ($NeedsDesktop -and -not (Get-Command node -ErrorAction SilentlyContinue)) { Fail "Node.js is required to build the isolated patch candidate." }
+
+if ($DryRun) {
+  $Candidate = Join-Path ([IO.Path]::GetTempPath()) ("oc-voice-dry-run-" + [guid]::NewGuid().ToString("N") + ".asar")
+  & node (Join-Path $PlatformDir "patch-oc-mic.js") --app $AppPath --input $AppAsar --output $Candidate
+  Check-Native "ASAR candidate generation"
+  Info "dry run complete; candidate generated at $Candidate. Nothing was installed or applied."
+  exit 0
+}
 
 if (-not $SkipDeps) {
-  if (-not (Test-Path $VenvPy)) {
-    Info "创建 Python 虚拟环境: $Venv"
-    python -m venv $Venv
-  }
-  Info "安装 faster-whisper ..."
-  & $VenvPy -m pip install -q --disable-pip-version-check -i $Mirror faster-whisper
-  if (-not $Cpu -and $hasNvidia) {
-    Info "安装 CUDA 运行库 (cuBLAS / cuDNN) ..."
-    & $VenvPy -m pip install -q --disable-pip-version-check -i $Mirror nvidia-cublas-cu12 nvidia-cudnn-cu12
-  } elseif (-not $Cpu) {
-    Warn "未检测到 NVIDIA 显卡，跳过 CUDA 库（省约 1.3GB 下载），识别将走 CPU"
-  } else {
-    Warn "CPU 模式：不安装 CUDA 运行库（识别会慢一些）"
-  }
-}
-
-if (-not $SkipModel) {
-  New-Item -ItemType Directory -Path $ModelDir -Force | Out-Null
-  if (Test-Path (Join-Path $ModelDir "model.bin")) {
-    Info "模型已存在，跳过下载: $ModelDir"
-  } else {
-    Info "下载模型 $Model 从 hf-mirror（大文件，请耐心等待）..."
-    $env:HF_ENDPOINT = "https://hf-mirror.com"
-    $env:HF_HUB_DISABLE_XET = "1"
-    $env:HF_HUB_ENABLE_HF_TRANSFER = "0"
-    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
-    & $VenvPy -c "from huggingface_hub import snapshot_download; snapshot_download('$($Repos[$Model])', local_dir=r'$ModelDir')"
-    if ($LASTEXITCODE -ne 0) { Fail "模型下载失败，请重试（会自动续传）。" }
-  }
-  if ($Model -ne "large-v3-turbo") {
-    [Environment]::SetEnvironmentVariable("OPENCODE_WHISPER_MODEL_DIR", $ModelDir, "User")
-    Info "已设置 OPENCODE_WHISPER_MODEL_DIR = $ModelDir"
-  }
-}
-
-Info "部署识别服务 ..."
-New-Item -ItemType Directory -Path $WhisperDir -Force | Out-Null
-Copy-Item (Join-Path $Root "stt_server.py") (Join-Path $WhisperDir "stt_server.py") -Force
-
-if (-not $NoApply) {
-  Info "生成补丁并应用到 OpenCode 桌面版 ..."
-  Push-Location $Root
-  try {
-    node (Join-Path $Root "patch-oc-mic.js")
-    if ($LASTEXITCODE -ne 0) { Fail "补丁生成失败，未做任何修改。" }
-  } finally { Pop-Location }
-
-  $Res = Join-Path $env:LOCALAPPDATA "Programs\@opencode-aidesktop\resources"
-  if (-not (Test-Path (Join-Path $Res "app.asar"))) { Fail "未找到 OpenCode 桌面版安装目录: $Res" }
-
-  Info "关闭 OpenCode ..."
-  Get-Process OpenCode -ErrorAction SilentlyContinue | Stop-Process -Force
-  Start-Sleep -Seconds 2
-
-  if (-not (Test-Path (Join-Path $Root "app.asar.original"))) {
-    Copy-Item (Join-Path $Res "app.asar") (Join-Path $Root "app.asar.original") -Force
-  }
-  Copy-Item (Join-Path $Res "app.asar") (Join-Path $Root "app.asar.bak") -Force
-  Copy-Item (Join-Path $Root "app.asar.patched") (Join-Path $Res "app.asar") -Force
-
-  Info "重启 OpenCode ..."
-  Start-Process (Join-Path $env:LOCALAPPDATA "Programs\@opencode-aidesktop\OpenCode.exe")
-  Info "完成！输入框工具栏上会出现麦克风按钮。"
+  if (-not (Get-Command python -ErrorAction SilentlyContinue)) { Fail "Python 3.10 or newer is required." }
+  $PreflightPython = "python"
 } else {
-  Info "完成（未应用补丁）。之后双击 apply-oc-mic.cmd 即可应用。"
+  if (-not (Test-Path -LiteralPath $VenvPy -PathType Leaf)) {
+    Fail "-SkipDeps was set, but the existing voice virtual environment is missing: $VenvPy"
+  }
+  $PreflightPython = $VenvPy
 }
+$PythonVersion = & $PreflightPython -c "import sys; print('%d.%d' % sys.version_info[:2])"
+Check-Native "Python version check"
+if ([version]$PythonVersion -lt [version]"3.10") { Fail "Python 3.10 or newer is required; found $PythonVersion." }
+Info "checking and stopping only an authenticated idle local voice service before dependency changes ..."
+& $PreflightPython $Helper stop-service --voice-home $VoiceHome
+Check-Native "local voice service preflight"
+
+if (-not $SkipDeps) {
+  if (-not (Test-Path -LiteralPath $VenvPy -PathType Leaf)) {
+    Info "creating isolated Python environment: $Venv"
+    & python -m venv $Venv
+    Check-Native "virtual environment creation"
+  }
+  Info "installing pinned runtime requirements ..."
+  & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $Requirements
+  if ($LASTEXITCODE -ne 0) {
+    Info "package mirror failed; retrying with official PyPI ..."
+    & $VenvPy -m pip install -q --disable-pip-version-check -r $Requirements
+    Check-Native "runtime dependency installation"
+  }
+}
+
+$HasNvidia = $false
+if (-not $Cpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+  & nvidia-smi -L *> $null
+  $HasNvidia = ($LASTEXITCODE -eq 0)
+}
+if ($HasNvidia) {
+  if (-not (Test-Path -LiteralPath $CudaRequirements -PathType Leaf)) { Fail "Pinned CUDA runtime requirements are missing: $CudaRequirements" }
+  if ($SkipDeps) {
+    & $VenvPy -m pip show nvidia-cublas-cu12 nvidia-cudnn-cu12 *> $null
+    Check-Native "existing CUDA runtime verification"
+  } else {
+    Info "installing pinned CUDA 12 / cuDNN 9 runtime wheels ..."
+    & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $CudaRequirements
+    if ($LASTEXITCODE -ne 0) {
+      Info "package mirror failed; retrying CUDA runtime wheels from official PyPI ..."
+      & $VenvPy -m pip install -q --disable-pip-version-check -r $CudaRequirements
+      Check-Native "CUDA runtime installation"
+    }
+  }
+} elseif (-not $Cpu) {
+  Info "NVIDIA runtime not detected; automatic backend selection can fall back to CPU. Use -Cpu to persist explicit CPU mode."
+}
+
+$Validated = $false
+if (Test-Path -LiteralPath $ModelPath -PathType Container) {
+  & $VenvPy $Helper validate-model --backend faster-whisper --model-path $ModelPath
+  $Validated = ($LASTEXITCODE -eq 0)
+}
+if (-not $Validated) {
+  if ($SkipModel) { Fail "-SkipModel was set, but the model is missing or incomplete: $ModelPath" }
+  Info "downloading local model $Repo ..."
+  & $VenvPy $Helper download-model --backend faster-whisper --repo $Repo --model-path $ModelPath
+  Check-Native "model download and validation"
+}
+
+Info "persisting backend, device, and model path in local-voice/config.json ..."
+& $VenvPy $Helper configure --backend faster-whisper --device $Device --model-path $ModelPath --voice-home $VoiceHome
+Check-Native "local voice configuration"
+
+& $VenvPy $Helper deploy --destination $WhisperDir
+Check-Native "voice server, CLI, and desktop bridge deployment"
+if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "stt_server.py") -PathType Leaf)) { Fail "voice service deployment failed verification." }
+if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "voice_server.py") -PathType Leaf)) { Fail "canonical voice server deployment failed verification." }
+if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "voice_cli.py") -PathType Leaf)) { Fail "voice CLI deployment failed verification." }
+if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "desktop-bridge.cjs") -PathType Leaf)) { Fail "desktop bridge deployment failed verification." }
+
+if ($NoApply) {
+  if ($AppPath) { Info "runtime installed; desktop patch was not applied. Run windows\apply-oc-mic.cmd --app `"$AppPath`" after closing OpenCode." }
+  else { Info "runtime and local CLI dependencies installed without requiring the desktop app. Run windows\apply-oc-mic.cmd --app APP_DIR after closing OpenCode if you use the desktop client." }
+  exit 0
+}
+
+Info "applying the patch from its verified candidate ..."
+$FeatureInstaller = Join-Path $PlatformDir "install-feature-preview.ps1"
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $FeatureInstaller -AppPath $AppPath -VoiceHome $VoiceHome -RuntimePath $WhisperDir -PythonPath $VenvPy
+Check-Native "desktop patch application"
+Info "installation complete. Start OpenCode through its maintained shortcut to use voice input."

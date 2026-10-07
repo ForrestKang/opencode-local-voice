@@ -1,271 +1,64 @@
-<h1 align="center">🎙 OpenCode Local Voice</h1>
+# OpenCode Local Voice V0.2.0
 
-<p align="center">
-  <strong>Local voice input for OpenCode Desktop — just speak, don't type</strong>
-</p>
+[简体中文](../README.md) · [Installation](install.md) · [Recovery](recovery-v0.2.0.md) · [Tests](testing-v0.2.0.md)
 
-<p align="center">
-  Click the mic, talk, press Enter — your words land in the prompt box. Fully offline, zero API fees.
-</p>
+OpenCode Local Voice records audio locally, transcribes it on the same machine, and inserts the result into the current OpenCode draft. The user reviews and sends the draft. The feature does not submit prompts automatically. The local service binds to loopback; installing dependencies or downloading a model may require network access.
 
-<p align="center">
-  <a href="https://github.com/ForrestKang/opencode-local-voice/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-  <a href="#quick-start"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-0078D6.svg?style=for-the-badge" alt="Platform"></a>
-  <a href="https://github.com/ForrestKang/opencode-local-voice/releases/latest"><img src="https://img.shields.io/github/v/release/ForrestKang/opencode-local-voice?style=for-the-badge&label=version&color=orange" alt="Latest release"></a>
-  <a href="https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ForrestKang/opencode-local-voice/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
-</p>
+The public identifier is **V0.2.0**. This repository currently describes a release candidate and its evidence; it does not claim a Git tag, GitHub Release, or full real-device approval on every platform. Older `0.2.x` and `0.3.x` names are internal development history, not earlier public releases.
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#how-it-works">How it works</a> · <a href="#faq">FAQ</a> · <a href="../README.md">中文</a>
-</p>
+## Current evidence
 
----
+One Windows live update was observed from OpenCode **1.18.34 to 1.18.35**. After the update, the V0.2.0 script loaded, the toolbar was mounted, recording started, and a result was inserted into the current draft. This observation does not measure recognition accuracy or latency and does not prove future versions, administrator installers, or other machines. See [the redacted Windows update record](windows-update-observed-v0.2.0.md) and [the validation summary](validation-results-v0.2.0.json).
 
-## Why OpenCode Local Voice?
+The current audit report is maintained in [repository-audit-v0.2.0.md](repository-audit-v0.2.0.md). The current checks passed 118 Node tests, 62 Python tests, 29 voice UI checks, 26 native settings checks and 13 standalone Electron checks. [testing-v0.2.0.md](testing-v0.2.0.md) separates these results from the previous candidate evidence. macOS has a Windows Git Bash simulation only; it is not real macOS runtime, signing, notarization, permission, Metal, microphone, or updater evidence.
 
-Describing what you want is the most common thing you do in OpenCode — yet you have to type every prompt word by word:
+## Behavior
 
-- ⌨️ Long prompts are painful to type — you'd much rather just talk
-- 🚫 **OpenCode Desktop has no built-in voice input** (office feature requests were closed as not planned)
-- ☁️ Cloud voice plugins need API keys, network access, and money — and they upload your audio
-- 🧩 The desktop app **doesn't load opencode plugins at all** (its server runs on Node, not Bun), so existing plugins simply won't work
-- 🔌 Rolling your own means recording, encoding, CORS, permissions, process management… all a pile of chores
+- Voice settings live in OpenCode's native Settings tabs and follow the host layout, theme, scrolling, and keyboard navigation. The feature does not create a separate settings website.
+- An optional isolated layout preview is available at [`docs/previews/native-settings-v2-light.png`](previews/native-settings-v2-light.png); it is a visual reference, not real-device evidence.
+- The microphone button starts the requesting/recording flow. The transcription is inserted into the current draft and is never submitted automatically.
+- `×` and Escape cancel requesting, recording, or busy work. STOP and Enter finish recording and start transcription.
+- Ordinary Space keeps the host's normal editing behavior. IME composition and modified shortcuts are not claimed by voice input.
+- There is no button that force-kills OpenCode. Normal `close`, Electron `destroyed`, and `will-quit` callbacks cover normal shutdown paths only. Task Manager termination, a hard kill, or power loss cannot run JavaScript exit hooks, so the feature cannot promise immediate cancellation, track release, or recovery of unsent audio and drafts in those cases.
 
-**OpenCode Local Voice turns it into one sentence:**
+Cancellation may terminate only the recognition worker owned by that task. The service refuses a shutdown while work is active; timeout cleanup is an exception path, not a hard-exit guarantee.
 
-```
-Install OpenCode Local Voice for me: https://raw.githubusercontent.com/ForrestKang/opencode-local-voice/main/docs/install.md
-```
+## Install and use
 
-Send this to the AI agent on your machine (Claude Code, Cursor, Windsurf — anything that can run shell commands): it reads the install doc and handles dependencies, model download, patching and restart by itself.
-
-> ⭐ **Star this project**: OpenCode updates overwrite the patch; I keep tracking new versions so a single re-apply always works.
-
-### ✅ What you probably want to know first
-
-| | |
-|---|---|
-| 💰 **Completely free** | Recognition runs on a local Whisper model — zero API cost. One-time model download ≈1.6GB (medium/small available for weaker machines) |
-| 🔒 **Private by design** | Audio never leaves your computer: microphone → local service. **No uploads, no network calls** |
-| 🎯 **Zero friction** | The mic button lives right next to the send button; nothing else about OpenCode changes |
-| 🔄 **Update-proof** | When an OpenCode update overwrites the patch, re-run the one-click apply script — no reinstall |
-| 🩺 **Self-diagnosing** | Renderer debug log + recognition service log make issues easy to pinpoint |
-| 🧯 **Always reversible** | The original `app.asar` (and macOS `Info.plist`) are backed up; one script restores the stock app |
-
----
-
-## Screenshots
-
-<p align="center">
-  <img src="assets/idle.png" alt="Idle state: mic button left of the send button" width="720">
-  <br>
-  <img src="assets/recording.png" alt="Recording: waveform, timer, stop" width="720">
-</p>
-
-> Real screenshots (light theme): top — idle state, the mic button sits just left of send; bottom — recording state (waveform + timer + stop).
-
----
-
-## Features
-
-- 🎤 **Mic button on the prompt toolbar** — same row and size as the send button, blends right in
-- 🗣️ **Local recognition** — faster-whisper large-v3-turbo, GPU (CUDA) first, CPU fallback
-- ⚡ **On-demand service** — nothing runs in the background; the local service auto-exits after 30 min idle to free VRAM/RAM
-- ⌨️ **Press Enter to finish** — stop recording with Enter (or the stop button, or the 60s cap); Esc cancels
-- 🧠 **Automatic language detection** — Chinese / English / mixed, no switching needed
-- 🧩 **Independent of the plugin system** — desktop won't load plugins? Fine, we inject via asar
-- 🧯 **Fully reversible** — backups, full-hash validation, one-command restore
-
----
-
-## How it works
-
-**This is a "local patch + local service" combo, not a regular plugin.**
-
-OpenCode Desktop does not load opencode's plugin system (its server runs on Node instead of Bun — npm plugin cache is never created and local plugins never load), so we take a three-layer approach:
-
-| Layer | File | Responsibility |
-|---|---|---|
-| ① Injected UI | `oc-mic.js` | Injected into the renderer: mic button, recording, local 16kHz WAV encoding, text insertion |
-| ② Patcher | `patch-oc-mic.js` | Modifies `app.asar`: grants mic permission in the main process + adds the transcription IPC bridge + injects the script |
-| ③ Recognition service | `stt_server.py` | Local HTTP service (127.0.0.1:47832) running faster-whisper |
-
-```
-┌──────────┐  MediaRecorder → WAV  ┌─────────────┐   IPC    ┌──────────────────┐
-│ 🎤 button │ ────────────────────► │ preload     │ ───────► │ main-process     │
-│ (injected)│                       │ bridge      │          │ patch (spawns    │
-└──────────┘                       └─────────────┘          │ service on demand)│
-                                                            └────────┬─────────┘
-                                                                     │ HTTP
-                                                            ┌────────▼─────────┐
-                                                            │ stt_server.py     │
-                                                            │ faster-whisper    │
-                                                            │ 127.0.0.1:47832   │
-                                                            └───────────────────┘
-```
-
-### Design principles
-
-- **Local first** — model, service and recordings form a closed loop on your machine; no cloud dependency
-- **Minimal footprint** — only three injection points inside `app.asar` (main / preload / entry HTML) plus one local Python service
-- **Fail-safe** — the patcher runs a **full hash validation over 6900+ files** of the produced archive; any mismatch aborts before anything is written
-- **Always reversible** — the stock `app.asar` is backed up on first apply; the restore script brings the official app back
-
----
-
-## Supported platforms
-
-| Capability | Windows | macOS |
-|---|---|---|
-| Mic button (toolbar injection) | ✅ | ✅ |
-| Local recognition | ✅ CUDA first / CPU fallback | ✅ CPU (fast on Apple Silicon) |
-| One-click install | `windows/install.ps1` | `macos/install.sh` |
-| One-click restore | `restore-oc-mic.cmd` | `restore-oc-mic.sh` |
-| Survives app updates | ✅ re-run apply | ✅ re-run apply (auto re-signs) |
-| Platform extras | mic permission built into the patch | Info.plist permission entry + ad-hoc re-sign + asar integrity fuse check |
-
----
-
-## Quick start
-
-### 🪟 Windows
-
-Requirements: Python 3.10+, Node.js LTS
+Requirements: Python 3.10+, Node.js 20+, and FFmpeg for CLI/TUI microphone capture. Close OpenCode normally before applying or restoring a desktop patch; the scripts do not terminate the application for you.
 
 ```powershell
-cd windows
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+# Windows: install the service, model, and desktop patch
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+
+# Windows: install only the service for Web/TUI/CLI use
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -NoApply
 ```
 
-<details>
-<summary>Optional flags &amp; what the installer does (click to expand)</summary>
-
-Optional flags:
+For an existing Windows install, run the read-only candidate check first:
 
 ```powershell
--Model medium|small      # smaller model for weak machines (default auto: NVIDIA→turbo, else by core count)
--Cpu                     # force CPU, skip CUDA libraries
--SkipDeps / -SkipModel   # skip already-installed parts
--NoApply                 # set up the service only, don't patch the app
+powershell -ExecutionPolicy Bypass -File .\windows\install-feature-preview.ps1 -DryRun
 ```
 
-What it does:
+Then, with OpenCode closed, use `windows\install-feature-preview.cmd`. For a managed install, run `windows\Restore-Voice.cmd -DryRun` before a restore. See the [installation guide](install.md) and [recovery guide](recovery-v0.2.0.md) for exact parameters and refusal conditions.
 
-1. Checks Python / Node
-2. Creates a virtualenv and installs faster-whisper (plus CUDA libraries only when an NVIDIA GPU is detected — saves ~1.3GB otherwise)
-3. Downloads the Whisper model from hf-mirror (resumable)
-4. Deploys the recognition service to `~/.config/opencode/whisper/`
-5. Generates and applies the `app.asar` patch (closes → replaces → restarts OpenCode)
+macOS uses `bash macos/install.sh` and `bash macos/apply-oc-mic.sh --app /Applications/OpenCode.app --dry-run`. An official macOS update replaces the bundle, so apply the candidate again after that update. Linux desktop patching is limited to a specified writable unpacked Electron directory; the shared service can still be installed with `bash linux/install.sh`.
 
-</details>
+Web, TUI, and CLI use the shared local service. Run Web/CLI commands with the installer-created `whisper-venv` Python (or another interpreter where the runtime requirements are installed), rather than an unrelated system Python. A Web userscript generated with `tools/make-web-script.py` contains a private local credential and must stay on the same machine. The CLI accepts `--file AUDIO`, `--record --mic NAME`, or `--serve`; it does not send OpenCode prompts.
 
-### 🍎 macOS
+The optional TUI source is `extras/voice-input.ts`. Copy it to the project `.opencode/plugins/` or user-level `~/.config/opencode/plugins/`, preserving any existing file first, then restart OpenCode. Merge third-party dependencies into the existing config-directory `package.json`; do not replace it. See the [OpenCode Plugins documentation](https://opencode.ai/docs/plugins/). The plugin provides a `voice_input` tool with `record`, `status`, `on`, `off`, and `toggle` actions; recording uses FFmpeg and appends to the TUI draft without submitting it.
 
-Requirements: `python3`, `node` (`brew install node`)
+## Platform limits
 
-```bash
-cd macos
-chmod +x *.sh
-./install.sh
-```
+Windows desktop recovery is version-, path-, and ASAR-hash-bound. Unknown layouts, administrator updates, busy services, and incompatible transactions fail closed. Never copy an old ASAR over a newer OpenCode version. Windows feature restore can replace configuration and runtime files inside the transaction snapshot; save later user changes before restoring and merge them afterwards.
 
-<details>
-<summary>Optional flags (click to expand)</summary>
+macOS backups cover the complete `.app` bundle. Candidate ad-hoc signing is not Developer ID signing, notarization, or Gatekeeper approval. Real macOS permissions, microphone behavior, Metal/CPU inference, and the official updater remain manual validation items.
 
-```bash
-./install.sh --model medium      # Intel Macs default to medium; small is also available
-./install.sh --pypi <index-url>  # defaults to the Tsinghua mirror
-./install.sh --no-apply          # set up the service only, don't patch
-```
+## Development and testing
 
-The macOS flow additionally: adds the mic permission entry to `Info.plist` → disables the asar integrity fuse if enabled → ad-hoc re-signs the app (without this macOS reports the app as "damaged") → restarts.
+Read [CONTRIBUTING.md](../CONTRIBUTING.md), [the testing guide](testing-v0.2.0.md), and [the manual checklist](manual-validation.md). Synthetic audio, substitute services, isolated ASAR fixtures, and a standalone Electron runtime do not prove a real microphone, a real OpenCode window, an official installer, or a real Mac application.
 
-</details>
+Do not publish tokens, personal userscripts, audio, transcripts, or private paths. See [SECURITY.md](../SECURITY.md).
 
-On first use, allow the microphone when the system asks (macOS: System Settings → Privacy & Security → Microphone).
-
----
-
-## Daily usage
-
-| Scenario | Windows | macOS |
-|---|---|---|
-| Applied a change to `oc-mic.js` | run `apply-oc-mic.cmd` | `./apply-oc-mic.sh` |
-| Restore the stock app | run `restore-oc-mic.cmd` | `./restore-oc-mic.sh` |
-| **After an OpenCode update** | re-run `apply-oc-mic.cmd` | re-run `./apply-oc-mic.sh` |
-
-> OpenCode updates overwrite `app.asar` (the patch is lost) — just re-apply, no reinstall needed.
-> If a major update changes the injection anchors, the patcher **fails validation and aborts** instead of corrupting your install.
-
----
-
-## Configuration (all optional)
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENCODE_STT_LOCAL_PORT` | 47832 | Local recognition service port |
-| `OPENCODE_STT_DEVICE` | auto | `auto` / `cuda` / `cpu` |
-| `OPENCODE_STT_BEAM` | 5 | Decoding beam width (1 is slightly faster but hurts Chinese punctuation quality) |
-| `OPENCODE_STT_THREADS` | 16 (Win) / 8 (mac) | CPU threads |
-| `OPENCODE_WHISPER_MODEL_DIR` | `~/.config/opencode/whisper-models/large-v3-turbo` | Model directory |
-| `OPENCODE_WHISPER_IDLE_SEC` | 1800 | Idle seconds before the service exits |
-| `OPENCODE_APP_PATH` (macOS) | `/Applications/OpenCode.app` | App location |
-
----
-
-## Security
-
-| Measure | Description |
-|---|---|
-| 🔒 **Audio never leaves the machine** | Recordings only travel between local memory and the local service; there is no network upload path |
-| 📦 **Controlled footprint** | Only three injection points in `app.asar` plus one local Python service; nothing system-wide |
-| ✅ **Full validation** | The patcher hashes 6900+ files of its output; any anomaly aborts without writing |
-| 💾 **Backups by default** | The stock `app.asar` (and `Info.plist` on macOS) is saved on first apply |
-| 🧯 **One-command rollback** | The restore script brings back the official app |
-| 👀 **Fully open source** | Every line is auditable; models come from public repositories |
-
-> ⚠️ **Unofficial patch notice**: this project works by modifying OpenCode Desktop's installation files (`app.asar`). It is unofficial and intended for personal, educational use. Evaluate the risks yourself; major OpenCode upgrades may require waiting for adaptation.
-
----
-
-## Uninstall
-
-1. Restore the stock app: Windows `restore-oc-mic.cmd` / macOS `./restore-oc-mic.sh`
-2. Optionally delete the local data:
-   ```
-   ~/.config/opencode/whisper-venv      # Python environment
-   ~/.config/opencode/whisper-models    # models (≈1.6GB)
-   ~/.config/opencode/whisper           # service + logs
-   ```
-
----
-
-## FAQ
-
-- **No mic button?** → check the debug log: Windows `%TEMP%\oc-mic-debug.log`, macOS `$TMPDIR/oc-mic-debug.log` (attach it when filing an issue)
-- **Recognition feels slow** → check `~/.config/opencode/whisper/stt_server.log`: `device=cuda` is the fast path; `cpu` means the GPU libraries are missing (works, just slower); CPU is normal on macOS. On weak machines, switch to `medium`/`small`
-- **Chinese punctuation missing?** → v0.1.1+ normalizes half-width punctuation to full-width and retries with a punctuation prompt when a Chinese result has none
-- **macOS says the app is "damaged"** → the script handles this automatically; if it persists, run `sudo xattr -dr com.apple.quarantine /Applications/OpenCode.app` and reopen
-- **Model size** → large-v3-turbo ≈ 1.54GB (≈2GB VRAM/RAM). On an RTX 4060, 10s of speech transcribes in ~0.5–2s
-- **A wall of `ResizeObserver` warnings in logs** → OpenCode's own noise, safe to ignore
-- **TUI / CLI support?** → desktop-only for now (the TUI ecosystem already has mature voice plugins). `extras/voice-input.ts` keeps a plugin-style implementation for reference
-
----
-
-## ⭐ Why this is worth a star
-
-I use this project every day, so I keep maintaining it.
-
-- Every OpenCode release that overwrites the patch → I verify the apply scripts still work
-- New platforms (Linux desktop) and better engines → on the roadmap
-- Found a problem? Open an [issue](https://github.com/ForrestKang/opencode-local-voice/issues) with the debug log attached
-
----
-
-## Credits
-
-[OpenCode](https://opencode.ai) · [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [whisper.cpp model ecosystem](https://github.com/ggml-org/whisper.cpp) · [hf-mirror](https://hf-mirror.com)
-
-## License
-
-[MIT](../LICENSE)
+[MIT License](../LICENSE)

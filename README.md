@@ -1,286 +1,81 @@
-<h1 align="center">🎙 OpenCode Local Voice</h1>
+# OpenCode Local Voice V0.2.0
 
-<p align="center">
-  <strong>给 OpenCode 桌面版装上「开口就能说话」的本地语音输入</strong>
-</p>
+[English](docs/README_en.md) · [安装](docs/install.md) · [恢复](docs/recovery-v0.2.0.md) · [测试](docs/testing-v0.2.0.md)
 
-<p align="center">
-  点一下麦克风，说完再点一下，文字自己写进输入框 —— 全程离线，不用一分钱 API
-</p>
+如果你希望在 OpenCode 中直接口述，OpenCode Local Voice 会在本机录音、转写，并把文字放入当前草稿。你可以检查、修改后再发送；功能不会代替 OpenCode 的发送操作。识别服务只连接本机，安装依赖和模型时可能需要网络。
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-  <a href="#快速开始"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-0078D6.svg?style=for-the-badge" alt="Platform"></a>
-  <a href="https://github.com/ForrestKang/opencode-local-voice/releases/latest"><img src="https://img.shields.io/github/v/release/ForrestKang/opencode-local-voice?style=for-the-badge&label=version&color=orange" alt="Latest release"></a>
-  <a href="https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ForrestKang/opencode-local-voice/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
-</p>
+## 当前状态
 
-<p align="center">
-  <a href="#快速开始">快速开始</a> · <a href="#特性">特性</a> · <a href="#工作原理">工作原理</a> · <a href="#常见问题">常见问题</a> · <a href="#卸载">卸载</a> · <a href="docs/README_en.md">English</a> · <a href="CHANGELOG.md">更新日志</a>
-</p>
+对外编号统一为 **V0.2.0**。当前材料是经过仓库审计和自动验证的发布候选；Git tag、GitHub Release 和真实设备验收单独记录。此前出现的 `0.2.x`、`0.3.x` 只表示内部开发历史。
 
----
+已记录的一次 Windows 实机更新为 OpenCode **1.18.34 → 1.18.35**。更新后回读到 V0.2.0 的脚本加载、工具栏挂载、录音开始和结果写入当前草稿；这次记录不评估识别准确率、延迟、未来版本、管理员安装器或其他机器。完整脱敏回读见 [Windows 更新实机记录](docs/windows-update-observed-v0.2.0.md) 和 [验证结果摘要](docs/validation-results-v0.2.0.json)。
 
-## 为什么需要 OpenCode Local Voice？
+本次仓库审计的最终指标记录在 [V0.2.0 仓库审计报告](docs/repository-audit-v0.2.0.md)。[测试与证据说明](docs/testing-v0.2.0.md) 给出本轮指标与执行方法，历史候选证据另行标注。
 
-用 OpenCode 写代码，最常干的事是"描述需求"——可每次都得把脑子里的 Prompt 一个字一个字敲出来：
+## 你会得到什么
 
-- ⌨️ "打一段两百字的 prompt" → **手酸**，明明动嘴几秒就能说完
-- 🚫 "OpenCode 桌面版有没有语音输入" → **没有**，官方相关提案一直没落地
-- ☁️ "装个语音插件" → 要么是 TUI 专属，要么是云端识别：**要 Key、要联网、要花钱，音频还得上传**
-- 🧩 "那装现成的 opencode 插件呗" → **装不上**，实测桌面版根本不加载插件系统（server 跑在 Node 里，npm / 本地插件全部无效）
-- 🔌 "自己接一个" → 录音、编码、CORS、麦克风权限、进程管理…… **全是碎活**
+- OpenCode 原生设置中提供“语音输入”页；它使用宿主设置的标签、主题、滚动和键盘布局，不创建独立网站或脱离宿主的设置页。
+- 可选的原生设置隔离预览见 [`docs/previews/native-settings-v2-light.png`](docs/previews/native-settings-v2-light.png)；预览只展示布局，不是实机验收证据。
+- 麦克风按钮开始 requesting/recording 流程，结果写入当前草稿，不自动发送。
+- `×` 或 Esc 可取消 requesting、recording、busy；录音中的 STOP 方块或 Enter 结束录音并进入转写。
+- 普通 Space 保持宿主原来的输入行为；IME 组合输入和带修饰键的快捷键不由语音功能抢占。
+- 没有“强杀 OpenCode”按钮。正常 `close`、Electron `destroyed` 和 `will-quit` 回调只能覆盖正常退出路径；任务管理器结束进程、硬退出或断电不会执行 JavaScript 退出钩子，因此不能承诺立即取消、释放所有音轨或恢复尚未提交的录音/草稿。
 
-**OpenCode Local Voice 把这件事变成一句话：**
-
-```
-帮我安装 OpenCode Local Voice：https://raw.githubusercontent.com/ForrestKang/opencode-local-voice/main/docs/install.md
-```
-
-把这句话发给你电脑上的 AI Agent（Claude Code、Cursor、Windsurf……任何能跑命令行的）：它会自己读取安装说明，完成依赖安装、模型下载、补丁注入与重启全套流程。详细步骤见 [docs/install.md](docs/install.md)。
-
-> ⭐ **Star 这个项目**：OpenCode 更新会覆盖补丁，我会持续跟踪新版本、保证 apply 脚本一直可用。你不用自己盯。
-
-### ✅ 在你用之前，你可能想知道
-
-| | |
-|---|---|
-| 💰 **完全免费** | 识别用本地 Whisper 模型，零 API 费用；一次性下载模型 ≈1.6GB（可换 medium/small 更小） |
-| 🔒 **隐私安全** | 音频只在你的电脑里流转：麦克风 → 本地服务，**不上传、不出网** |
-| 🎯 **开箱即用** | 麦克风按钮直接长在发送键左边，不改变 OpenCode 任何原有交互 |
-| 🔄 **抗更新** | OpenCode 升级覆盖补丁后，重跑一条 apply 脚本即恢复，不用重装 |
-| 🩺 **自带诊断** | 渲染层调试日志 + 识别服务日志，出问题一眼定位 |
-| 🧯 **可回滚** | 打补丁前自动备份原版 app.asar（macOS 含 Info.plist），一键还原官方 |
-
----
-
-## 效果
-
-<p align="center">
-  <img src="docs/assets/idle.png" alt="空闲状态：麦克风按钮位于发送键左侧" width="720">
-  <br>
-  <img src="docs/assets/recording.png" alt="录音中：波形、计时、停止" width="720">
-</p>
-
-> 实录截图（浅色主题）：上 —— 空闲状态，麦克风按钮就在发送键左边；下 —— 点击后进入录音状态（波形 + 计时 + 停止）
-
-- 点 🎤 开始录音：工具栏变成录音条（波形 + 计时）
-- 说完按 **Enter**（或点停止、或满 60 秒自动结束）立即转写；按 **Esc** 取消
-- 识别中图标转圈，1 秒左右后**文字直接出现在输入框**，检查后按回车发送
-- 自动识别中 / 英 / 混说，不需要切换
-
----
-
-## 特性
-
-- 🎤 **按钮在提示词工具栏上**：和发送键同排、同款尺寸，无感融入
-- 🗣️ **本地识别**：faster-whisper large-v3-turbo，GPU（CUDA）优先、自动回退 CPU
-- ⚡ **服务按需拉起**：不用语音时零常驻；空闲 30 分钟自动退出释放显存
-- 🧠 **自动语言检测**：中英混合也能正确转写
-- 🧩 **不依赖官方插件系统**：桌面版不加载插件？没关系，我们用 asar 注入方案
-- 🧯 **全程可回滚**：所有改动有备份、有校验、有一键还原
-
----
-
-## 工作原理
-
-**本项目是一个「本地补丁 + 本地服务」的组合，不是普通插件。**
-
-实测 OpenCode 桌面版不加载 opencode 插件系统（server 运行在 Node 而非 Bun，npm 插件缓存不生成、本地插件不加载），所以走三层方案：
-
-| 层 | 文件 | 职责 |
-|---|---|---|
-| ① 注入 UI | `oc-mic.js` | 注入渲染页面：麦克风按钮、录音、本地编码 16kHz WAV、写入输入框 |
-| ② 补丁器 | `patch-oc-mic.js` | 修改 `app.asar`：主进程加麦克风权限 + IPC 转写接口 + 注入脚本 |
-| ③ 识别服务 | `stt_server.py` | 本地 HTTP 服务（127.0.0.1:47832），faster-whisper 推理 |
-
-```
-┌──────────┐   MediaRecorder→WAV   ┌─────────────┐   IPC    ┌──────────────────┐
-│ 🎤 按钮   │ ────────────────────► │ preload 桥   │ ───────► │ 主进程补丁        │
-│ (注入脚本)│                       │ (ocMic)     │          │ 按需拉起识别服务   │
-└──────────┘                       └─────────────┘          └────────┬─────────┘
-                                                                    │ HTTP
-                                                           ┌────────▼─────────┐
-                                                           │ stt_server.py     │
-                                                           │ faster-whisper    │
-                                                           │ 127.0.0.1:47832   │
-                                                           └───────────────────┘
-```
-
-### 设计原则
-
-- **本地优先**：识别模型、服务、录音全部本机闭环，没有云端依赖
-- **最小入侵**：只动 `app.asar` 里的三个注入点（主进程 / preload / 入口 HTML）+ 一个本地 Python 服务
-- **失败即中止**：补丁器对打好的包做**全量文件哈希校验**（6950+ 个文件），任何一步对不上就直接退出，**不会把应用改坏**
-- **永远能回滚**：首次打补丁自动保存官方原版，`restore` 脚本一键还原
-
----
-
-## 支持的平台
-
-| 能力 | Windows | macOS |
-|---|---|---|
-| 麦克风按钮（工具栏注入） | ✅ | ✅ |
-| 本地识别 | ✅ CUDA 优先 / CPU 回退 | ✅ CPU（M 系列很快） |
-| 一键安装 | `windows/install.ps1` | `macos/install.sh` |
-| 一键还原官方 | `restore-oc-mic.cmd` | `restore-oc-mic.sh` |
-| 应用更新后恢复 | ✅ 重跑 apply | ✅ 重跑 apply（自动重签名） |
-| 平台特殊处理 | 麦克风权限已内置于补丁 | Info.plist 权限声明 + ad-hoc 重签名 + asar 完整性 fuse 检查 |
-
----
+取消只影响当前窗口和当前任务；必要时只终止该任务拥有的识别 worker。服务有活动任务时拒绝静默 shutdown；服务超时回收属于异常清理，不能当作硬退出后的即时恢复保证。
 
 ## 快速开始
 
-### 🪟 Windows
+先安装 Python 3.10+、Node.js 20+。CLI/TUI 的录音还需要 FFmpeg。安装或应用补丁前保存工作并正常退出 OpenCode；脚本不会强制结束用户应用。
 
-依赖：Python 3.10+、Node.js LTS
+- Windows：查看 [安装说明](docs/install.md) 中的 `install.ps1`、候选 DryRun 和受管维护入口。
+- macOS：使用 `macos/install.sh` 和 `macos/apply-oc-mic.sh`；更新官方 `.app` 后需重新 apply。
+- Linux：仅对明确指定、可写的解包 Electron 目录提供应用补丁；服务安装仍使用 `linux/install.sh`。
+- 回退和恢复：先读 [恢复说明](docs/recovery-v0.2.0.md)，再执行匹配版本和哈希的 DryRun。
+- 真实设备验收：按 [真实环境验收清单](docs/manual-validation.md) 逐项记录 `PASS / FAIL / 未测`。
 
-```powershell
-cd windows
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-<details>
-<summary>可选参数与它会做什么？（点击展开）</summary>
-
-可选参数：
+常用 Windows 命令（在仓库根目录执行）：
 
 ```powershell
--Model medium|small      # 低配/小显存换小模型（默认 large-v3-turbo ≈1.6GB）
--Cpu                     # 不用 GPU，强制 CPU
--SkipDeps / -SkipModel   # 已装过则跳过
--NoApply                 # 只装识别服务，不打补丁
+# 安装依赖、模型和服务，并应用桌面补丁
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
+
+# 只安装服务，供 Web/TUI/CLI 使用
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -NoApply
+
+# 只生成候选并验证，不替换应用或配置
+powershell -ExecutionPolicy Bypass -File .\windows\install-feature-preview.ps1 -DryRun
 ```
 
-它会做什么：
+只读检查通过且 OpenCode 已退出后，才运行 `.\windows\install-feature-preview.cmd`。已接管的安装使用 `.\windows\Restore-Voice.cmd -DryRun` 先检查，再按 [恢复说明](docs/recovery-v0.2.0.md) 执行恢复。
 
-1. 检查 Python / Node 环境
-2. 创建虚拟环境并安装 faster-whisper（GPU 模式附带 CUDA 运行库）
-3. 从 hf-mirror 下载 Whisper 模型（自动续传）
-4. 部署本地识别服务 `~/.config/opencode/whisper/`
-5. 生成并应用 app.asar 补丁（自动关闭 → 替换 → 重启 OpenCode）
+TUI 可选插件是 `extras/voice-input.ts`，使用 OpenCode plugin 机制加载后提供 `voice_input` 工具。`action=record` 录音并追加草稿，`status`/`on`/`off`/`toggle` 只读或改变开关；录音需要 FFmpeg，工具不自动发送。
 
-</details>
+## 接入方式和平台边界
 
-### 🍎 macOS
+| 接入方式 | 支持范围 | 主要边界 |
+| --- | --- | --- |
+| Windows Desktop | 已知 Electron/ASAR 布局、用户级安装 | 未知布局、管理员更新和跨版本事务拒绝操作；直接运行 `OpenCode.exe` 可能绕过维护入口 |
+| macOS Desktop | 完整 `.app` 备份、候选 apply/restore | 真实 Mac 权限、Metal、签名、公证、Gatekeeper、官方更新和麦克风仍需实机验收；官方更新后要重新 apply |
+| Linux Desktop | 明确指定的可写解包目录 | 商店包、Tauri 包和不可写/未识别布局不在范围内 |
+| Web | 精确 Origin 的本机 userscript | 个人脚本含本机凭据，只留在本机；它不修改 Web 服务前端 |
+| TUI / CLI | 共享本地服务 | 不自动发送；CLI 录音依赖 FFmpeg |
 
-依赖：`python3`、`node`（`brew install node`）
+Windows 的一次真实更新记录不能外推为 macOS 或 Linux 的真实更新能力。Mac 当前仍只有 Windows Git Bash 模拟，不能写成真实 Mac 通过。
 
-```bash
-cd macos
-chmod +x *.sh
-./install.sh
-```
+## 更新、恢复和隐私
 
-<details>
-<summary>可选参数？（点击展开）</summary>
+Windows 维护入口按应用版本、ASAR 哈希和事务清单选择备份；未知原生结构、管理员路径、服务忙或哈希不匹配时拒绝覆盖。不要用旧 ASAR 跨 OpenCode 版本覆盖新应用。Windows 的应用恢复（feature restore）会恢复事务快照范围内的配置和后台文件，可能覆盖安装后后来修改的设置；恢复前先把这些变化另存，恢复后再合并。应用恢复不等于删除模型、聊天、工作区、venv 或服务凭据。
 
-```bash
-./install.sh --model medium      # Intel Mac 建议换 medium / small
-./install.sh --pypi <index-url>  # 默认清华镜像，海外可传官方源
-./install.sh --no-apply          # 只装识别服务，不打补丁
-```
+macOS 以完整 `.app` 为备份和恢复单位。如果原包的 Electron embedded ASAR integrity fuse 已启用，apply 只会在候选 `.app` 上关闭该 fuse 并进行 ad-hoc 签名；这会降低候选包的宿主 ASAR 完整性强制检查，原始完整 `.app` 和 fuse 状态保留用于恢复。它不能替代 Developer ID、公证、Gatekeeper 或真实系统验收。
 
-macOS 版会自动：往 Info.plist 加麦克风权限声明 → 检查并关闭 asar 完整性 fuse（如启用）→ ad-hoc 重签名（不做会报"已损坏"）→ 重启。
+不要提交 token、个人 Web 配对脚本、录音、业务转写、未脱敏路径或配置。安全边界和报告方式见 [SECURITY.md](SECURITY.md)。
 
-</details>
+## 测试导航
 
-首次点击麦克风时，按系统提示允许麦克风权限即可（macOS：系统设置 → 隐私与安全性 → 麦克风）。
+- [测试与证据说明](docs/testing-v0.2.0.md)：本轮测试指标、执行条件和证据模板。
+- [Windows bug、修法和边界](docs/windows-bugs-v0.2.0.md)：Electron `app.asar` 误判、取消竞态、输入按键和服务生命周期。
+- [更新生存说明](docs/update-survival.md)：一次官方更新后的交接、启动和恢复边界。
+- [推送前审计清单](docs/review-before-push-v0.2.0.md)：发布候选范围、证据和未覆盖项；不把本机状态写成 GitHub Release。
+- [贡献与验证](CONTRIBUTING.md)：目录职责、测试命令和脱敏要求。
 
----
-
-## 日常使用
-
-| 场景 | Windows | macOS |
-|---|---|---|
-| 改了 `oc-mic.js` 后应用 | 双击 `apply-oc-mic.cmd` | `./apply-oc-mic.sh` |
-| 还原官方原版 | 双击 `restore-oc-mic.cmd` | `./restore-oc-mic.sh` |
-| **OpenCode 更新后** | 重新 `apply-oc-mic.cmd` | 重新 `./apply-oc-mic.sh` |
-
-> OpenCode 桌面版更新会覆盖 `app.asar`（补丁丢失），重跑一次 apply 即可，不需要重装。
-> 若大版本升级导致注入点变化，补丁器会**校验失败并中止**，不会破坏安装。
-
----
-
-## 配置（环境变量，全部可选）
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `OPENCODE_STT_LOCAL_PORT` | 47832 | 本地识别服务端口 |
-| `OPENCODE_STT_DEVICE` | auto | `auto` / `cuda` / `cpu` |
-| `OPENCODE_STT_BEAM` | 5 | 解码宽度（设为 1 可略提速，但中文标点质量会下降） |
-| `OPENCODE_STT_THREADS` | 16 (Win) / 8 (mac) | CPU 线程数 |
-| `OPENCODE_WHISPER_MODEL_DIR` | `~/.config/opencode/whisper-models/large-v3-turbo` | 模型目录 |
-| `OPENCODE_WHISPER_IDLE_SEC` | 1800 | 服务空闲自动退出秒数 |
-| `OPENCODE_APP_PATH`（macOS） | `/Applications/OpenCode.app` | 应用位置 |
-
----
-
-## 安全性
-
-| 措施 | 说明 |
-|---|---|
-| 🔒 **音频不出本机** | 录音只在本机内存与本地服务之间流转，没有任何网络上传 |
-| 📦 **改动范围可控** | 只动 `app.asar` 的三个注入点 + 一个本地 Python 服务，不碰系统 |
-| ✅ **全量校验** | 补丁器对生成结果做 6950+ 文件的哈希校验，异常即中止、不落盘 |
-| 💾 **默认备份** | 首次打补丁自动保存原版 app.asar（macOS 另存 Info.plist） |
-| 🧯 **一键回滚** | `restore` 脚本随时还原官方应用 |
-| 👀 **完全开源** | 所有代码可审查，识别模型来自公开仓库 |
-
-> ⚠️ **非官方补丁提醒**：本项目通过修改 OpenCode Desktop 的安装文件（`app.asar`）实现，属于非官方方案，仅供个人学习与效率使用。请自行评估风险；OpenCode 大版本升级后可能需要等待适配。
-
----
-
-## 卸载
-
-1. 还原官方版：Windows `restore-oc-mic.cmd` / macOS `./restore-oc-mic.sh`
-2. 可选删除数据（释放空间）：
-   ```
-   ~/.config/opencode/whisper-venv      # Python 环境
-   ~/.config/opencode/whisper-models    # 模型（≈1.6GB）
-   ~/.config/opencode/whisper           # 识别服务与日志
-   ```
-
----
-
-## 常见问题
-
-- **按钮没出现** → 查看调试日志：Windows `%TEMP%\oc-mic-debug.log`、macOS `$TMPDIR/oc-mic-debug.log`（记录渲染层日志与页面 URL，提 Issue 时附上即可）
-- **识别慢** → 看 `~/.config/opencode/whisper/stt_server.log`：显示 `device=cuda` 为最佳状态；显示 `cpu` 说明显卡库缺失（功能正常，只是慢一点）；macOS 走 CPU 属正常
-- **macOS 提示"已损坏"** → 脚本已自动处理；若仍报错执行 `sudo xattr -dr com.apple.quarantine /Applications/OpenCode.app` 后重开
-- **模型多大** → large-v3-turbo ≈ 1.54GB，显存/内存占用 ≈2GB；RTX 4060 上 10 秒语音约 0.5~2 秒出结果
-- **日志里一堆 `ResizeObserver` 警告** → OpenCode 自身噪音，可忽略
-- **支持 TUI / CLI 版吗** → 目前只做桌面版（TUI 生态已有成熟语音插件）。`extras/voice-input.ts` 里保留了插件版实现供参考
-
----
-
-## 贡献
-
-欢迎 Issue 与 PR！
-
-- 开发与 PR 流程：见 [CONTRIBUTING.md](CONTRIBUTING.md)
-- 安全问题：见 [SECURITY.md](SECURITY.md)
-- 版本历史：见 [CHANGELOG.md](CHANGELOG.md)
-- 让 AI Agent 代劳安装：见 [docs/install.md](docs/install.md)
-
----
-
-## ⭐ 为什么值得 Star
-
-这个项目我自己每天在用，所以我会一直维护它。
-
-- OpenCode 每次更新覆盖补丁 → 我会跟进验证 apply 脚本
-- 新的平台（Linux 桌面版）、更好的模型 → 会陆续加
-- 遇到问题欢迎提 [Issue](https://github.com/ForrestKang/opencode-local-voice/issues)，附上调试日志，我尽力解决
-
-点个 Star，下次 OpenCode 更新时能找到它。⭐
-
----
-
-## 致谢
-
-[OpenCode](https://opencode.ai) · [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [whisper.cpp 模型生态](https://github.com/ggml-org/whisper.cpp) · [hf-mirror](https://hf-mirror.com)
-
-## License
-
-[MIT](LICENSE)
+[MIT License](LICENSE) · [OpenCode](https://opencode.ai) · [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)

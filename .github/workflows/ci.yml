@@ -6,34 +6,97 @@ on:
   pull_request:
 
 jobs:
-  syntax:
-    runs-on: ubuntu-latest
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
-      - name: JavaScript syntax check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install isolated test dependencies
         run: |
-          node --check windows/oc-mic.js
-          node --check macos/oc-mic.js
-          node --check windows/patch-oc-mic.js
-          node --check macos/patch-oc-mic.js
+          npm ci --ignore-scripts --no-audit --no-fund
+          python -m pip install -r requirements-test.txt
+
+      - name: Source and TUI type checks
+        run: |
+          npm run check:sources
+          npm run check:docs
+          npm run typecheck
+
+      - name: Client, patch and restore regressions
+        run: npm test
+
+      - name: Install pinned Electron runtime for updater regression
+        if: runner.os == 'Windows'
+        run: |
+          npm install --prefix test-results/electron-runtime --ignore-scripts --no-audit --no-fund electron@44.6.0
+          node test-results/electron-runtime/node_modules/electron/install.js
+
+      - name: Electron updater bridge regression
+        if: runner.os == 'Windows'
+        env:
+          OC_VOICE_REQUIRE_ELECTRON: '1'
+        run: npm run test:electron-runtime
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && always()
+        with:
+          name: electron-updater-runtime-results
+          path: test-results/electron-update-runtime.json
+
+      - name: HTTP, process and integration regressions
+        run: npm run test:python
 
       - name: Shell syntax check
+        if: runner.os != 'Windows'
         run: |
           bash -n macos/install.sh
           bash -n macos/apply-oc-mic.sh
           bash -n macos/restore-oc-mic.sh
+          bash -n linux/install.sh
+          bash -n linux/apply-oc-mic.sh
+          bash -n linux/restore-oc-mic.sh
+          bash -n linux/voice-cli.sh
 
-      - name: Python syntax check
+      - name: PowerShell syntax check
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          python3 -m py_compile windows/stt_server.py
-          python3 -m py_compile macos/stt_server.py
+          Get-ChildItem windows/*.ps1 | ForEach-Object {
+            $tokens = $null; $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          }
 
-      - name: Shared files consistency
-        run: |
-          cmp windows/oc-mic.js macos/oc-mic.js
-          cmp windows/stt_server.py macos/stt_server.py
+      - name: Candidate package integrity
+        run: npm run package
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx playwright-core install --with-deps chromium
+      - name: Synthetic audio and UI regression
+        run: npm run test:ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-browser-test-results
+          path: test-results/

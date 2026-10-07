@@ -5,3 +5,15 @@ backup/
 *.log
 *.log.1
 __pycache__/
+node_modules/
+dist/
+test-results/
+.venv-test/
+*.personal.user.js
+models/
+backups/
+.venv/
+config.json
+credentials.json
+token
+rewrite_api_key

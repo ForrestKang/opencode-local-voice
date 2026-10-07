@@ -1,0 +1,29 @@
+{
+  "name": "opencode-local-voice",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local speech-to-text with native OpenCode settings and Desktop, Web, TUI and CLI adapters",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node tools/run-tests.cjs",
+    "test:python": "python -m unittest discover -s tests -p test_voice*.py -v",
+    "test:ui": "node tests/ui-browser.cjs",
+    "test:native-settings": "node tests/native-settings-browser.cjs",
+    "test:electron-runtime": "node tests/electron-update-runtime.cjs",
+    "typecheck": "tsc --project tsconfig.json",
+    "check:sources": "node tools/check-sources.cjs",
+    "check:docs": "node tools/check-docs.cjs",
+    "sync-renderer": "node tools/sync-renderer.cjs",
+    "test:all": "npm run check:sources && npm run check:docs && npm run typecheck && npm test && npm run test:python && npm run test:ui",
+    "package": "python tools/package-release.py && python tools/verify-release.py"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.34",
+    "@types/node": "24.19.1",
+    "playwright-core": "1.63.0",
+    "typescript": "7.0.2",
+    "yaml": "2.8.1"
+  }
+}
