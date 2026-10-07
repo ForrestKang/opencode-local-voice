@@ -42,6 +42,8 @@
 
 首个提交的 Ubuntu 回归与浏览器检查通过。Windows 发现 fixture 清理阶段把 TEMP 中的 8.3 短文件名 `runner~1` 与 realpath 长文件名比较，导致身份断言失败。测试现在创建 fixture 后立即保存 canonical root，继续保留严格清理校验；没有删除用例或放宽安装/恢复保护。修复后重新运行 Windows maintenance 分项并推送，后续 CI 结果以 GitHub Actions 记录为准。
 
+第二次回读中 Windows/Mac Node 和 Windows 独立 Electron 通过；Python 的同一 CUDA fixture 在 Windows 8.3 与 macOS `/var` 别名下也存在未规范化预期值。测试改为创建时解析 TEMP，与生产代码返回的 canonical DLL 目录一致；venv 内目录限制和 DLL 句柄保留断言继续执行。修复后重跑 Python 全量并再次提交。
+
 ## 本机 ASAR 只读检查
 
 对 OpenCode 1.18.35 生成隔离候选，完成文件哈希、重复应用幂等性、生产代码回读和 8 个脚本语法检查：

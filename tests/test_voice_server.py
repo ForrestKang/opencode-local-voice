@@ -729,7 +729,9 @@ class ConfigAndWorkerTests(unittest.TestCase):
 
     def test_windows_cuda_runtime_uses_only_venv_nvidia_dll_dirs_and_keeps_handles(self):
         with tempfile.TemporaryDirectory() as temp:
-            prefix = Path(temp) / "venv"
+            # Production discovery returns canonical paths; TEMP may contain
+            # an 8.3 alias on Windows or /var -> /private/var on macOS.
+            prefix = Path(temp).resolve() / "venv"
             site_packages = prefix / "Lib" / "site-packages"
             cublas = site_packages / "nvidia" / "cublas" / "bin"
             cudnn = site_packages / "nvidia" / "cudnn" / "bin"

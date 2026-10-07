@@ -2,7 +2,7 @@
   "schema": 1,
   "publicVersion": "0.2.0",
   "status": "validated-repository-candidate",
-  "generatedAt": "2026-10-07T08:21:26.723383+00:00",
+  "generatedAt": "2026-10-07T08:28:19.148292+00:00",
   "baseGitCommit": "52d599771e38758361ee3b3953654cd7845642db",
   "host": {
     "os": "Windows 11",
@@ -194,7 +194,7 @@
       "tests/test_voice_client_integration.py": "2a6f1aced73b8a74e4ebaf604abe1fb50387b63f006473b79d8fdea7330d7dd6",
       "tests/test_voice_cold_start.py": "bbba423b37dc1e433d42bb18d6567ea74a9c9213fc83d3a5d6197b31494ead09",
       "tests/test_voice_release.py": "5f6ea70579096c5902f7d55715cf3be756a3b2dbd9ef7e54f7a99489e0a55259",
-      "tests/test_voice_server.py": "623aac5aa543d1f9aef19debd77c67bd61158be25ca89562ea23a15aa46979e1",
+      "tests/test_voice_server.py": "164b7c3bff11c29f2c25d2f6e5f7fd72ce554ec38906b6698789e5eea3230f80",
       "tests/test_voice_text.py": "3511e9a7f8d8444c83b766503b64604ca09d177226e99f1f67852ad58d43108f",
       "tests/tui.test.cjs": "3480147a3192c6d70eeb953fea009bea07961c308bfeaea247f6f483525fb2bd",
       "tests/ui-browser.cjs": "880e67a4440856b9b3b41ea4630c4760450c90ac4af1391267ee6e41b0f4a83c",
@@ -227,5 +227,16 @@
     "windowsRegression": "FAIL fixture short-path cleanup assertion",
     "fix": "Canonicalize the newly created fixture root; strict recursive cleanup identity check retained.",
     "followup": "Retested locally; latest workflow outcome recorded separately in GitHub Actions."
+  },
+  "remoteCiSecondPush": {
+    "commit": "248368e83aeb741b4f6cdb0e37bb32f14d737bc5",
+    "ubuntuRegression": "PASS",
+    "browser": "PASS",
+    "windowsNode": "PASS",
+    "macosNode": "PASS",
+    "windowsElectron": "PASS",
+    "pythonFailure": "CUDA fixture expected unresolved TEMP aliases; production returned canonical DLL directories.",
+    "fix": "Resolve the temporary fixture path before constructing venv expectations; all directory/handle assertions retained.",
+    "localFollowup": "Python 62/62 PASS; latest complete CI outcome is available in GitHub Actions."
   }
 }
