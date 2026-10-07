@@ -38,6 +38,10 @@
 
 环境：Windows 11 x64、Node 24.15.0、Python 3.12.10、Chromium 153.0.8010.12 / Playwright 1.63.0。具体执行条件见 [测试说明](testing-v0.2.0.md)。原始日志保留在本地 `test-results/`。Node 的 stop、阶段恢复和无效布局报错属于故障注入的预期输出，每项均断言拒绝与文件状态。
 
+### 首次远端 CI 回读
+
+首个提交的 Ubuntu 回归与浏览器检查通过。Windows 发现 fixture 清理阶段把 TEMP 中的 8.3 短文件名 `runner~1` 与 realpath 长文件名比较，导致身份断言失败。测试现在创建 fixture 后立即保存 canonical root，继续保留严格清理校验；没有删除用例或放宽安装/恢复保护。修复后重新运行 Windows maintenance 分项并推送，后续 CI 结果以 GitHub Actions 记录为准。
+
 ## 本机 ASAR 只读检查
 
 对 OpenCode 1.18.35 生成隔离候选，完成文件哈希、重复应用幂等性、生产代码回读和 8 个脚本语法检查：

@@ -2,7 +2,7 @@
   "schema": 1,
   "publicVersion": "0.2.0",
   "status": "validated-repository-candidate",
-  "generatedAt": "2026-10-07T08:12:56.828667+00:00",
+  "generatedAt": "2026-10-07T08:21:26.723383+00:00",
   "baseGitCommit": "52d599771e38758361ee3b3953654cd7845642db",
   "host": {
     "os": "Windows 11",
@@ -68,6 +68,12 @@
       "skip": 0,
       "includedInNodeSuite": true,
       "evidence": "test-results/final-path-subset-audit.txt"
+    },
+    "windowsMaintenanceFollowup": {
+      "pass": 2,
+      "fail": 0,
+      "includedInNodeSuite": true,
+      "evidence": "test-results/maintenance-ci-fix-audit.txt"
     }
   },
   "checks": {
@@ -178,7 +184,7 @@
       "tests/macos-release.test.cjs": "893806e3adb802391cc8a0e496f7e97cb08ac438c6d115952087263f60333ede",
       "tests/maintenance-inspect.test.cjs": "4a7f262a2d2007191d9b6b2d374a8747e38665f5ff0d27964967d4559580c9f4",
       "tests/maintenance-package.test.cjs": "01bdccd4e92bd79e07a59900c7f840ff589a5b858ac8acffd7dc09adcd985a1b",
-      "tests/maintenance-windows.cjs": "da6d32cbde3b9b1ca4232d71fe182dffce7aa323c831f4b725446796153ea21c",
+      "tests/maintenance-windows.cjs": "418ff3a27e4ae783a313c9292179c41f1d7431d84adcbc9dd5411f3904a6cbdd",
       "tests/maintenance-windows.test.cjs": "8815ec958e09502e4ccc6ad0b30e0669f2a4f0f5fc6a9f923264ac7bf0d7100e",
       "tests/native-settings-browser.cjs": "8e9c2946f54d332a1b06375901f71c435c99cdcda325284853ad0301e4b7456c",
       "tests/patch-install-support.test.cjs": "b2e35ee5e4a92a862b411c16bd29013049ae46ce0c973ffb0a5be69388628a28",
@@ -213,5 +219,13 @@
     "githubReleaseCreated": false,
     "localAppInstalledThisAudit": false,
     "archives": "Local dist/SHA256SUMS.txt; not uploaded as a GitHub Release."
+  },
+  "remoteCiFirstPush": {
+    "commit": "314ae4bdddd606770b4d1632cb13e45bd5fda32a",
+    "ubuntuRegression": "PASS",
+    "browser": "PASS",
+    "windowsRegression": "FAIL fixture short-path cleanup assertion",
+    "fix": "Canonicalize the newly created fixture root; strict recursive cleanup identity check retained.",
+    "followup": "Retested locally; latest workflow outcome recorded separately in GitHub Actions."
   }
 }

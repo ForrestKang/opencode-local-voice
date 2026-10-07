@@ -1,7 +1,9 @@
 "use strict";
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),cp=require('node:child_process'),assert=require('node:assert/strict');
 const p=require('../shared/patch-package.cjs'),{makeAsar,baseFiles}=require('../tests/fixtures/asar.cjs');
-const source=path.resolve(__dirname,'..'),root=fs.mkdtempSync(path.join(os.tmpdir(),'oc-maintenance-fixture-')),app=path.join(root,'OpenCode With Space'),home=path.join(root,'home'),runtime=path.join(root,'runtime'),maintenance=path.join(root,'maintenance'),backups=path.join(maintenance,'backups');
+// Hosted Windows TEMP may use an 8.3 alias. Resolve the fixture at creation
+// while keeping the strict identity check before recursive cleanup.
+const source=path.resolve(__dirname,'..'),root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'oc-maintenance-fixture-'))),app=path.join(root,'OpenCode With Space'),home=path.join(root,'home'),runtime=path.join(root,'runtime'),maintenance=path.join(root,'maintenance'),backups=path.join(maintenance,'backups');
 function ps(script,args=[]){const childEnv={...process.env};delete childEnv.PSModulePath;const r=cp.spawnSync('powershell.exe',['-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',script,...args],{encoding:'utf8',windowsHide:true,timeout:120000,env:childEnv});if(r.error||r.status!==0)throw new Error((r.stderr||r.stdout||r.error?.message).slice(-3500));return JSON.parse(r.stdout.replace(/^\uFEFF/,'').trim());}
 const linkTool=path.join(root,'links.ps1');
 try {
