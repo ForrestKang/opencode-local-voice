@@ -1,14 +1,15 @@
-OpenCode 本地语音 0.2.0
+OpenCode Local Voice V0.2.0 — Windows 维护入口
 
-请通过已接管的桌面、开始菜单或任务栏快捷方式打开 OpenCode。
-Repair-Voice.cmd：检查并恢复语音入口，随后启动 OpenCode。
-Repair-Voice.cmd -Check：只检查，不修改文件、不启动应用。
-Restore-Voice.cmd -DryRun：只验证回退，不修改文件。
-退出 OpenCode 后运行 Restore-Voice.cmd：恢复快捷方式及当前版本对应的应用和后台备份。
+日常使用：通过安装器维护后的桌面或开始菜单快捷方式启动 OpenCode。
+语音入口消失：退出 OpenCode，先运行 Repair-Voice.cmd -Check 检查，再运行 Repair-Voice.cmd 修复并启动。
+撤回插件：退出 OpenCode，先运行 Restore-Voice.cmd -DryRun 检查，再运行 Restore-Voice.cmd 恢复备份。
 
-active.json 指向应用目录之外的稳定发布缓存；无需保留下载 ZIP 或工作区源码。
-recovery.log 记录维护错误，不记录语音、聊天或 AI 密钥。
-禁止将旧版 OpenCode 的应用备份恢复到新版应用。
-直接运行 OpenCode.exe 会绕过启动恢复检查。
-未来未知应用布局、需要管理员权限的更新，需要兼容插件版本或人工维护。
-本方案没有安装常驻服务或 Windows 计划任务。
+恢复可能覆盖安装后修改的语音设置和运行时文件，请先另存当前配置或导出词表。
+恢复不会删除识别模型、聊天记录或工作区。
+备份须与当前应用版本匹配，请勿用旧版 app.asar 覆盖刚更新的 OpenCode。
+
+直接运行 OpenCode.exe 可能绕过启动检查。不支持的新版结构或管理员安装需要新版适配。
+维护工具已保存在本目录，日常启动与修复无需保留下载 ZIP 或源码目录。
+
+安装与更新：https://github.com/ForrestKang/opencode-local-voice
+问题反馈：https://github.com/ForrestKang/opencode-local-voice/issues

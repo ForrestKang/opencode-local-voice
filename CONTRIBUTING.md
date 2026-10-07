@@ -1,56 +1,42 @@
-# 贡献与验证
+# 贡献指南
 
-本仓库对外版本统一为 **V0.2.0**。`0.2.x`、`0.3.x` 只用于说明内部开发历史；修改文档、测试和代码时不要把历史编号写成已发布版本。
+感谢你为 OpenCode Local Voice 提交问题、改进代码或完善文档。项目的运行时功能、桌面补丁和本机服务都在同一个仓库中维护，请让每个改动保持清晰、可回退，并说明它影响的接入方式。
 
-## 报告问题
+## 开始开发
 
-请附系统和架构、OpenCode 版本/发行格式、Desktop/Web/TUI/CLI 接入方式、backend/device/model、录音长度、冷/热识别耗时、复现步骤和脱敏错误信息。说明证据类型：自动测试、隔离浏览器、真实启动、真实官方更新或真实麦克风。
-
-不要提交 token、API 密钥、个人 Web 配对脚本、应用恢复备份、原始录音、业务转写、个人绝对路径或未脱敏配置。问题中若包含 `app.asar`，只提供必要的版本和 SHA256 摘要。
-
-## 目录职责
-
-| 目录/文件 | 职责 |
-| --- | --- |
-| `shared/voice_server.py` | loopback 服务、配置、鉴权、队列和推理 worker |
-| `shared/voice_cli.py` | FFmpeg 文件/麦克风客户端和服务入口 |
-| `shared/desktop-bridge.cjs` | Desktop IPC、服务生命周期、任务所有权和取消 |
-| `shared/oc-mic.js` | 共享录音、取消、按键和草稿界面 |
-| `shared/browser-transport.js` | Web 本机协议客户端 |
-| `shared/patch-package.cjs` | ASAR 校验、补丁候选生成和恢复辅助 |
-| `shared/install-support.*` | 模型校验/下载、部署和安装支持 |
-| `windows` / `macos` / `linux` | 平台安装、应用和恢复入口 |
-| `extras/voice-input.ts` | 可选 TUI 草稿工具 |
-| `tools` / `tests` | 打包、源检查和隔离回归 |
-
-渲染器的权威修改在 `shared/oc-mic.js`。若存在兼容副本，运行 `npm run sync-renderer`，再检查生成文件。保留 OpenCode 原有 form/contenteditable/submit 锚点；未知 DOM、ASAR 布局或权限结构应失败并给出诊断，不能用宽泛正则删除主进程后续代码。
-
-## 本地检查
+项目需要 Node.js 20+ 和 Python 3.10+。CLI/TUI 的录音功能还需要 FFmpeg。安装开发依赖：
 
 ```bash
-npm ci
+npm ci --ignore-scripts --no-audit --no-fund
 python -m pip install -r requirements-test.txt
+```
+
+常用检查命令：
+
+```bash
 npm run check:sources
 npm run check:docs
 npm run typecheck
 npm test
 npm run test:python
+npm run test:all
 ```
 
-`npm run test:all` 是上述常规源检查、类型检查、Node、Python 和语音 UI 的组合，不包含需要外部应用包的原生设置测试，也不包含独立 Electron runtime。变更涉及对应路径时再运行下面的隔离检查。
+`npm run test:all` 包含源检查、文档检查、类型检查、Node、Python 和语音 UI 回归。语音 UI 使用 Playwright Core 和合成音频；需要时先安装 Chromium：
 
-语音 UI 和原生设置 UI 使用 Playwright Core。先准备一份本机已有的 Chromium/Chrome 可执行文件，再设置实际路径；不要把不存在的占位路径直接提交或当作通过：
+```bash
+npx playwright-core install chromium
+npm run test:ui
+```
+
+涉及原生 OpenCode 设置页时，可以使用本地安装的 `app.asar` 运行回归：
 
 ```powershell
-$env:OC_VOICE_TEST_BROWSER = "<已确认存在的Chromium或Chrome可执行文件>"
-npm run test:ui
-
-# 下面的 ASAR 必须是获准读取的 OpenCode app.asar，测试只读它
-$env:OC_VOICE_NATIVE_ASAR = "<已确认存在的OpenCode app.asar>"
+$env:OC_VOICE_NATIVE_ASAR = "<OpenCode app.asar 的完整路径>"
 npm run test:native-settings
 ```
 
-Windows Electron runtime 回归使用项目配置的 Electron 44.6.0 binary。要求测试缺失时直接失败，不得通过跳过来隐藏环境问题：
+更新桥的独立 Electron 回归使用项目固定的 Electron 44.6.0。测试环境缺少该运行时会直接失败：
 
 ```powershell
 npm install --prefix test-results/electron-runtime --ignore-scripts --no-audit --no-fund electron@44.6.0
@@ -59,12 +45,46 @@ $env:OC_VOICE_REQUIRE_ELECTRON = "1"
 npm run test:electron-runtime
 ```
 
-`test:electron-runtime` 的输出保存在 `test-results/`；它覆盖 production controller/bridge 的隔离链路，不等同于真实 OpenCode 窗口或官方 installer。Mac 相关测试如果在 Windows Git Bash 中运行，报告中必须标为模拟。
+打包命令会生成四个平台的候选包并校验版本、入口、文件哈希和不应进入发行包的内容：
 
-PowerShell 脚本使用 Parser API 检查，Bash 脚本使用 `bash -n` 检查。测试不会请求真实麦克风；浏览器使用合成音频，推理可使用 fake 后端。真实 Windows/macOS 设备应按 [docs/manual-validation.md](docs/manual-validation.md) 单独验收。
+```bash
+npm run package
+```
 
-## 打包和文档
+测试和打包命令不会替你操作正在运行的 OpenCode，也不会把个人配置、凭据、录音或模型写进仓库。需要真实设备验证的改动，请在 Pull Request 中说明验证环境和限制。
 
-`npm run check:docs` 检查 Markdown 代码围栏和仓库内链接，不访问外部网站。`npm run package` 会生成 source、Windows、macOS、Linux 四个候选 ZIP 和 `SHA256SUMS.txt`，随后自动运行 `verify-release`，校验四个压缩包的覆盖范围、文件哈希、版本、平台入口和私有运行时排除。它不自动上传 GitHub，也不创建 tag 或 Release。检查包内容后再处理发布流程。
+## 代码结构
 
-行为变更要同步更新用户文档和 CHANGELOG；测试证据应记录运行命令、环境、结果文件和证据边界。自动测试、ASAR 模拟或本机启动通过时，不要写成真实麦克风、真实官方更新、签名/公证或未来版本兼容。
+| 目录或文件 | 作用 |
+| --- | --- |
+| `shared/voice_server.py` | 本机服务、配置、鉴权、队列和识别 worker |
+| `shared/voice_cli.py` | 文件/麦克风客户端和服务入口 |
+| `shared/desktop-bridge.cjs` | Desktop IPC、服务生命周期和任务取消 |
+| `shared/oc-mic.js` | 录音、取消、快捷键和草稿界面 |
+| `shared/browser-transport.js` | Web 本机服务客户端 |
+| `shared/patch-package.cjs` | ASAR 校验、补丁和恢复辅助 |
+| `shared/install-support.*` | 模型、部署和安装支持 |
+| `windows`、`macos`、`linux` | 各平台安装、应用和恢复入口 |
+| `extras/voice-input.ts` | 可选的 TUI 草稿工具 |
+| `tools`、`tests` | 打包、源检查和回归测试 |
+
+渲染器的权威实现是 `shared/oc-mic.js`。修改它以后，按项目约定运行 `npm run sync-renderer`，并检查生成的兼容副本。涉及 OpenCode DOM 或 ASAR 结构的改动必须在结构不匹配时安全失败，不能用宽泛替换破坏宿主应用。
+
+## 提交问题和 Pull Request
+
+提交 Issue 时，请提供系统、OpenCode 版本、接入方式、实际 backend/device/model、复现步骤和脱敏错误信息。不要上传 token、API 密钥、个人 Web 配对脚本、应用备份、原始录音、业务转写、个人绝对路径或未脱敏配置。安全漏洞请按 [SECURITY.md](SECURITY.md) 私密报告。
+
+提交 Pull Request 时：
+
+1. 从最新的 `main` 创建分支，并说明改动解决的问题和影响范围。
+2. 保持代码、用户文档和 `CHANGELOG.md` 一致；不把内部调试材料或个人环境文件加入提交。
+3. 运行与改动相关的检查，并在描述中写出命令和未覆盖的环境边界。
+4. 保持提交聚焦，避免无关的依赖升级、格式化或接口变更。
+
+语音输入的用户行为约定需要保持一致：Enter 或 STOP 结束录音并转写，Esc 或 `×` 取消，普通空格保留 OpenCode 原有行为，识别结果写入草稿后由用户自行发送。改动这些行为时，请在 PR 中说明兼容性影响。
+
+## CI
+
+GitHub Actions 在 Ubuntu、Windows 和 macOS 上运行源检查、类型检查、Node/Python 回归、Shell 或 PowerShell 语法检查和候选包校验。Windows 还运行固定 Electron runtime 的更新桥回归；Ubuntu 运行 Playwright 语音 UI 回归。Pull Request 合并前应等待相关检查完成。
+
+项目使用 MIT License。提交代码即表示你有权按该许可证授权这些贡献。

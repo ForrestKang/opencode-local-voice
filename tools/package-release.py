@@ -9,9 +9,11 @@ import re
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE_FILES = ("README.md", "UI-TEST.md", "LICENSE", "VERSION", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md",
+BASE_FILES = ("README.md", "LICENSE", "VERSION", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md",
               "package.json", "package-lock.json", "tsconfig.json", ".gitignore", ".gitattributes")
-COMMON_DIRS = ("shared", "extras", "tools", "docs", "tests", ".github")
+PUBLIC_DOCS = ("README_en.md", "install.md", "configuration.md", "update-survival.md",
+               "recovery-v0.2.0.md", "release-v0.2.0.md")
+COMMON_DIRS = ("shared", "extras", "tools", "tests", ".github")
 SUFFIXES = {".py", ".pyw", ".js", ".cjs", ".ts", ".json", ".md", ".txt", ".sh", ".ps1", ".cmd", ".yml", ".png"}
 PLATFORMS = ("source", "windows", "macos", "linux")
 
@@ -21,8 +23,9 @@ def release_files(platform="source"):
         raise ValueError("Unknown release platform: " + str(platform))
     developer_files = {"package.json", "package-lock.json", "tsconfig.json"}
     files = {ROOT / name for name in BASE_FILES if platform == "source" or name not in developer_files}
+    files.update(ROOT / "docs" / name for name in PUBLIC_DOCS)
     files.update(ROOT.glob("requirements*.txt"))
-    common = COMMON_DIRS if platform == "source" else ("shared", "extras", "tools", "docs")
+    common = COMMON_DIRS if platform == "source" else ("shared", "extras", "tools")
     directories = (*common, *(('windows', 'macos', 'linux') if platform == 'source' else (platform,)))
     for name in directories:
         for path in (ROOT / name).rglob("*"):

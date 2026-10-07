@@ -52,6 +52,21 @@ class ReleaseTests(unittest.TestCase):
                 name = next(name for name in archive.namelist() if name.endswith("macos/install.sh"))
                 self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o755)
 
+    def test_local_reports_are_not_distributed_as_user_documentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            docs = fixture_root / "docs"
+            docs.mkdir()
+            (docs / "install.md").write_text("Installation guide", encoding="utf-8")
+            (docs / "local-audit.md").write_text("Private machine report", encoding="utf-8")
+            (fixture_root / "UI-TEST.md").write_text("Local UI observations", encoding="utf-8")
+            for platform in release.PLATFORMS:
+                with self.subTest(platform=platform), patch.object(release, "ROOT", fixture_root):
+                    selected = set(release.release_files(platform))
+                    self.assertIn(docs / "install.md", selected)
+                    self.assertNotIn(docs / "local-audit.md", selected)
+                    self.assertNotIn(fixture_root / "UI-TEST.md", selected)
+
     def test_build_refuses_unknown_platform_and_missing_source_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "Unknown release platform"):
