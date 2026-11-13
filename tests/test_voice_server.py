@@ -1030,5 +1030,151 @@ class ConfigAndWorkerTests(unittest.TestCase):
             temp.cleanup()
 
 
+class Option2LightweightTests(unittest.TestCase):
+    def test_empty_model_path_and_stt_key_secret_storage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "voice-home"
+            store = ConfigStore(home)
+            cfg = store.get()
+            self.assertEqual(cfg["backend"], "auto")
+            self.assertEqual(cfg["model_path"], "")
+            self.assertEqual(cfg["stt_base_url"], "")
+            self.assertFalse(store.public()["stt_key_configured"])
+
+            with self.assertRaises(ConfigError):
+                store.update({"backend": "faster-whisper", "model_path": ""})
+            with self.assertRaises(ConfigError):
+                store.update({"backend": "mlx", "model_path": ""})
+
+            updated, changed = store.update({
+                "backend": "openai-api",
+                "stt_base_url": "https://api.groq.com/openai/v1",
+                "stt_model": "whisper-large-v3-turbo",
+                "stt_api_key": "gsk_super_secret",
+            })
+            self.assertIn("stt_api_key", changed)
+            self.assertEqual(updated["stt_base_url"], "https://api.groq.com/openai/v1/audio/transcriptions")
+            self.assertEqual(store.get_stt_api_key(), "gsk_super_secret")
+            public_cfg = store.public()
+            self.assertTrue(public_cfg["stt_key_configured"])
+            self.assertNotIn("stt_api_key", public_cfg)
+            self.assertNotIn("stt_api_key", json.loads(store.config_path.read_text(encoding="utf-8")))
+            self.assertNotIn(b"gsk_super_secret", store.stt_key_path.read_bytes()) if os.name == "nt" else None
+
+            store.update({"stt_api_key": ""})
+            self.assertFalse(store.public()["stt_key_configured"])
+            self.assertFalse(store.stt_key_path.exists())
+
+    def test_lightweight_openai_api_coordinator_and_test_endpoint_without_worker_spawn(self):
+        stt_requests = []
+
+        class MockSttHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                stt_requests.append({"auth": self.headers.get("Authorization"), "size": len(body)})
+                payload = json.dumps({"text": "hello  opencode"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = HTTPServer(("127.0.0.1", 0), MockSttHandler)
+        srv_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        srv_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                store = ConfigStore(Path(temp) / "voice-home")
+                store.update({
+                    "backend": "openai-api",
+                    "stt_base_url": f"http://127.0.0.1:{srv.server_address[1]}/v1",
+                    "stt_model": "whisper-1",
+                    "stt_api_key": "stt-secret-key",
+                })
+                with patch.object(voice_server, "ProcessWorker",
+                                  side_effect=AssertionError("lightweight mode must not spawn ProcessWorker")):
+                    coordinator = Coordinator(
+                        store.get(),
+                        rewrite_api_key=store.get_rewrite_api_key(),
+                        stt_api_key=store.get_stt_api_key(),
+                    )
+                    server = create_server(store=store, coordinator=coordinator, port=0)
+                    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+                    server_thread.start()
+                    try:
+                        warmup = coordinator.enqueue_warmup()
+                        self.assertEqual(warmup.state, "done")
+                        status = coordinator.status()
+                        self.assertEqual(status["runtime_mode"], "lightweight")
+                        self.assertEqual(status["resolved_backend"], "openai-api")
+                        self.assertTrue(status["configured"])
+
+                        job_id = str(uuid.uuid4())
+                        coordinator.enqueue(job_id, wav16())
+                        result = coordinator.wait(job_id, timeout=5)
+                        self.assertEqual(result["state"], "done")
+                        self.assertEqual(result["raw_text"], "hello  opencode")
+                        self.assertEqual(stt_requests[-1]["auth"], "Bearer stt-secret-key")
+
+                        # Test /v1/stt/test HTTP endpoint
+                        req = Request(
+                            f"http://127.0.0.1:{server.server_address[1]}/v1/stt/test",
+                            data=json.dumps({"config": {}, "stt_api_key": "override-key"}).encode("utf-8"),
+                            headers={"Authorization": "Bearer " + store.token, "Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urlopen(req, timeout=5) as resp:
+                            self.assertEqual(resp.status, 200)
+                            test_payload = json.loads(resp.read().decode("utf-8"))
+                        self.assertTrue(test_payload["ok"])
+                        self.assertEqual(stt_requests[-1]["auth"], "Bearer override-key")
+                    finally:
+                        server.shutdown()
+                        server.server_close()
+                        coordinator.close()
+                        server_thread.join(timeout=2)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            srv_thread.join(timeout=1)
+
+    def test_unconfigured_auto_backend_reports_stt_not_configured_without_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ConfigStore(Path(temp) / "voice-home")
+            with patch.object(voice_server, "apple_speech_helper_info", return_value=None), \
+                    patch.object(voice_server, "ProcessWorker",
+                                 side_effect=AssertionError("unconfigured mode must not spawn ProcessWorker")):
+                coordinator = Coordinator(store.get())
+                try:
+                    status = coordinator.status()
+                    self.assertFalse(status["configured"])
+                    self.assertEqual(status["runtime_mode"], "lightweight")
+                    job_id = str(uuid.uuid4())
+                    coordinator.enqueue(job_id, wav16())
+                    res = coordinator.wait(job_id, timeout=3)
+                    self.assertEqual(res["state"], "error")
+                    self.assertEqual(res["code"], "stt_not_configured")
+                finally:
+                    coordinator.close()
+
+    def test_apple_speech_engine_invocation_and_error_handling(self):
+        fake_proc = type("FakeProc", (), {
+            "returncode": 0,
+            "poll": lambda self: 0,
+            "communicate": lambda self: ('{"text":"macos native speech","on_device":true}\n', ""),
+        })()
+        with patch.object(voice_server, "apple_speech_helper_info", return_value=("binary", Path("/tmp/oc-apple-speech"))), \
+                patch.object(voice_server.subprocess, "Popen", return_value=fake_proc) as popen_mock:
+            text = voice_server.AppleSpeechEngine.transcribe_wav(wav16(), language="zh")
+            self.assertEqual(text, "macos native speech")
+            cmd = popen_mock.call_args[0][0]
+            self.assertIn("--audio", cmd)
+            self.assertIn("--language", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

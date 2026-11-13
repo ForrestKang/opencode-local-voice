@@ -14,7 +14,7 @@ async function fixture(t, overrides = {}) {
     if (req.headers.authorization !== "Bearer " + token) return json(401, { error: "unauthorized" });
     if (url.pathname === "/v1/config") return json(200, { beam_size: 1, max_seconds: 120, port: server.address().port });
     if (url.pathname === "/v1/status") return json(200, { model_state: "ready", device: "fake" });
-    if (req.method === "POST" && ["/v1/text", "/v1/rewrite/test"].includes(url.pathname)) {
+    if (req.method === "POST" && ["/v1/text", "/v1/rewrite/test", "/v1/stt/test"].includes(url.pathname)) {
       let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => { const body = JSON.parse(data); events.at(-1).body = body; json(200, url.pathname === "/v1/text" ? { raw_text: body.text, local_text: "local", text: "preview", processing_warning: null, timings: { local_seconds: 0.01 } } : { ok: true, message: "connected" }); }); return;
     }
     if (req.method === "POST" && url.pathname.endsWith("/use-local")) { const id = url.pathname.split("/")[3]; jobs.set(id, { id, state: "done", text: "local fallback", raw_text: "raw speech", local_text: "local fallback", processing_warning: "AI skipped", timings: { rewrite_seconds: 0.02 } }); return json(200, jobs.get(id)); }
@@ -237,4 +237,18 @@ test("closing a client cancels only its own jobs while the shared service stays 
   assert.equal((await pending).code, "CANCELLED"); assert.equal(f.jobs.get(otherId).state, "transcribing");
   assert.equal((await other.status()).model_state, "ready");
   await other.cancel(otherId); assert.equal((await otherPending).code, "CANCELLED");
+});
+
+test("STT connection test forwards optional stt_api_key and rejects untrusted senders", async t => {
+  const f = await fixture(t), handlers = new Map(), app = new EventEmitter();
+  delete global.__ocVoiceV2; t.after(() => { delete global.__ocVoiceV2; });
+  install({ app, ipcMain: { removeHandler: name => handlers.delete(name), handle: (name, fn) => handlers.set(name, fn) } }, { voiceHome: f.directory, home: f.directory });
+  const sender = new EventEmitter(); sender.id = 9; sender.mainFrame = { url: "oc://renderer/index.html" }; sender.getURL = () => sender.mainFrame.url; sender.isDestroyed = () => false; sender.send = () => {};
+  assert.equal((await handlers.get("oc-voice:test-stt")({ sender, senderFrame: {} }, {})).code, "UNTRUSTED_SENDER");
+  const res = await handlers.get("oc-voice:test-stt")({ sender, senderFrame: sender.mainFrame }, { backend: "openai-api", stt_base_url: "https://api.groq.com/openai/v1", stt_model: "whisper-large-v3-turbo" }, "temporary-stt-key");
+  assert.equal(res.ok, true);
+  assert.deepEqual(f.events.find(e => e.path === "/v1/stt/test").body, {
+    config: { backend: "openai-api", stt_base_url: "https://api.groq.com/openai/v1", stt_model: "whisper-large-v3-turbo" },
+    stt_api_key: "temporary-stt-key",
+  });
 });

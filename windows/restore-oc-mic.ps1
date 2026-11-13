@@ -19,8 +19,8 @@ try {
   $ActivePath = Join-Path $env:USERPROFILE ".config\opencode\voice-maintenance\active.json"
   if (Test-Path -LiteralPath $ActivePath -PathType Leaf) {
     $ActiveVoice = Get-Content -LiteralPath $ActivePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($ActiveVoice.schema -eq 1 -and $ActiveVoice.featureVersion -eq '0.2.0' -and $AppPath.Equals([IO.Path]::GetFullPath($ActiveVoice.app), [StringComparison]::OrdinalIgnoreCase)) {
-      if ($InputArchive -or $BackupRoot) { throw 'Use the managed Restore-Voice entry for an active 0.2.0 install; custom legacy ledgers cannot restore its maintained shortcuts.' }
+    if ($ActiveVoice.schema -eq 1 -and $ActiveVoice.featureVersion -eq '0.2.1' -and $AppPath.Equals([IO.Path]::GetFullPath($ActiveVoice.app), [StringComparison]::OrdinalIgnoreCase)) {
+      if ($InputArchive -or $BackupRoot) { throw 'Use the managed Restore-Voice entry for an active 0.2.1 install; custom legacy ledgers cannot restore its maintained shortcuts.' }
       & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ActiveVoice.packageRoot 'windows\restore-voice-managed.ps1') -ConfigPath $ActivePath
       if ($LASTEXITCODE -ne 0) { throw 'Managed voice restore failed.' }
       exit 0

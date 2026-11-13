@@ -1,8 +1,8 @@
 # 安装指南
 
-安装器会创建独立的 Python 环境、下载识别模型并部署本地服务。桌面集成还会备份并修改 OpenCode 应用。开始前准备 Python 3.10+、Node.js 20+，保存工作并完全退出 OpenCode。
+默认安装采用**按平台差异化零下载策略**：仅创建极简 Python 标准库虚拟环境（`--without-pip`，不安装 PyTorch / `faster-whisper` / `mlx-whisper` 等重型依赖）并部署纯标准库本地服务；仅在显式传入 `-WithLocalModel`（Windows）或 `--with-local-model`（macOS/Linux）时才安装本地 Whisper 模型。桌面集成还会备份并修改 OpenCode 应用。开始前准备 Python 3.10+、Node.js 20+，保存工作并完全退出 OpenCode。
 
-首次安装需要联网。CLI/TUI 麦克风录音需要 FFmpeg；桌面与 Web 通过浏览器录音接口采集音频。
+默认轻量化安装无需下载模型；若使用 CLI/TUI 麦克风录音仍需安装 FFmpeg，桌面与 Web 通过浏览器录音接口采集音频。
 
 以下命令在仓库根目录运行。获取源码：
 
@@ -13,7 +13,7 @@ cd opencode-local-voice
 
 ## Windows
 
-支持用户级 Electron 安装，应用目录须包含 `resources\app.asar`。
+支持用户级 Electron 安装，应用目录须包含 `resources\app.asar`。默认跳过重型依赖与模型下载；安装后在 **设置 → 语音输入** 中选择 OpenAI 兼容预设（如 Groq、硅基流动或本机局域网 Whisper 服务）并填入接口地址与 Key 即可使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
@@ -22,23 +22,26 @@ powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
 常用选项：
 
 ```powershell
-# 使用 CPU 和 small 模型
-powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -Cpu -Model small
+# 仅安装轻量本地服务，供 Web/TUI/CLI 使用
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -NoApply
+
+# 按需安装完整高精度本地 Whisper 模型（faster-whisper + 模型下载）
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -WithLocalModel
+
+# 安装本地模型时指定 CPU 和 small 模型
+powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -WithLocalModel -Cpu -Model small
 
 # 自定义 OpenCode 安装目录
 powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -AppPath "D:\Apps\OpenCode"
-
-# 仅安装本地服务，供 Web/TUI/CLI 使用
-powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -NoApply
 ```
 
-模型可选 `auto`、`large-v3-turbo`、`medium`、`small`。`auto` 按设备选择预设；如需更小的模型，可显式选择 `small`。已有完整环境时可使用 `-SkipDeps`、`-SkipModel` 复用依赖和模型。
+仅在启用 `-WithLocalModel` 时才会下载模型，模型可选 `auto`、`large-v3-turbo`、`medium`、`small`。已有本地环境时可使用 `-SkipDeps`、`-SkipModel` 复用依赖和模型。
 
 安装完成后，从桌面或开始菜单中维护后的 OpenCode 快捷方式启动，进入 **设置 → 语音输入**。维护入口会在启动前检查插件；直接运行 `OpenCode.exe` 可能绕过此检查。更新后的处理见 [更新指南](update-survival.md)。
 
 ### 更新已有插件
 
-本地服务和模型已安装时，可以只应用新的桌面补丁。先生成候选并检查兼容性：
+本地服务已安装时，可以只应用新的桌面补丁。先生成候选并检查兼容性：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\windows\install-feature-preview.ps1 -DryRun
@@ -54,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File .\windows\install-feature-preview.ps1 -
 
 ## macOS
 
-桌面适配为实验性，支持包含 `Contents/Resources/app.asar` 的完整 Electron `.app`。Apple Silicon 使用 MLX 后端；Intel Mac 使用 faster-whisper CPU 后端。
+桌面适配为实验性，支持包含 `Contents/Resources/app.asar` 的完整 Electron `.app`。默认自动编译系统原生 `oc_apple_speech` 辅助程序（基于 macOS Speech / `SFSpeechRecognizer`，优先端侧识别）并创建极简 Python 环境，零 pip 包、零模型下载：
 
 ```bash
 bash macos/install.sh --app /Applications/OpenCode.app
@@ -66,6 +69,12 @@ bash macos/install.sh --app /Applications/OpenCode.app
 bash macos/install.sh --no-apply
 ```
 
+如需加装本地 Whisper 模型（Apple Silicon 使用 MLX，Intel Mac 使用 faster-whisper CPU），可传入 `--with-local-model`：
+
+```bash
+bash macos/install.sh --with-local-model --app /Applications/OpenCode.app
+```
+
 已有运行环境时，可先检查再应用桌面补丁：
 
 ```bash
@@ -75,11 +84,11 @@ bash macos/apply-oc-mic.sh --app /Applications/OpenCode.app
 
 脚本会保留完整 `.app` 备份，并对候选应用进行 ad-hoc 签名。如果原包启用了 Electron 的 ASAR 完整性验证 fuse，候选包会关闭该验证。这会改变应用的信任与完整性保护，ad-hoc 签名也不等同于官方签名或公证；请在了解这些影响后使用桌面补丁。
 
-首次录音时允许系统麦克风权限；若被拒绝，请在系统的隐私与安全性设置中调整。官方更新替换 `.app` 后，需要重新应用兼容补丁。完整应用恢复见 [恢复指南](recovery-v0.2.0.md#macos)。
+首次录音时允许系统麦克风与语音识别权限；若被拒绝，请在系统的隐私与安全性设置中调整。官方更新替换 `.app` 后，需要重新应用兼容补丁。完整应用恢复见 [恢复指南](recovery-v0.2.0.md#macos)。
 
 ## Linux
 
-默认只安装本地服务：
+默认只安装零下载轻量本地服务（创建 `--without-pip` 标准库环境，不下载模型）：
 
 ```bash
 bash linux/install.sh
@@ -91,9 +100,15 @@ bash linux/install.sh
 bash linux/install.sh --apply --app /path/to/unpacked/OpenCode
 ```
 
+如需同时安装本地 `faster-whisper` 与模型，传入 `--with-local-model`：
+
+```bash
+bash linux/install.sh --with-local-model --model small
+```
+
 已有服务时，可用 `bash linux/apply-oc-mic.sh --app /path/to/unpacked/OpenCode` 应用补丁。不可写目录、商店包、Tauri 包和未知布局不支持桌面补丁。
 
-macOS/Linux 的安装器均接受 `--model auto|large-v3-turbo|medium|small`、`--pypi URL`、`--skip-deps` 和 `--skip-model`；后两项要求已有完整环境。Linux 的 `--apply` 需要同时提供 `--app`。
+macOS/Linux 的安装器均接受 `--with-local-model`、`--model auto|large-v3-turbo|medium|small`、`--pypi URL`、`--skip-deps` 和 `--skip-model`；其中 `--model` 仅在 `--with-local-model` 时生效。Linux 的 `--apply` 需要同时提供 `--app`。
 
 ## Web
 

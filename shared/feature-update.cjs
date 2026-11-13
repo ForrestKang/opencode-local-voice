@@ -74,7 +74,7 @@ function apply(args, hooks = {}) {
   if (args.expectedSourceHash != null && (!/^[0-9a-f]{64}$/.test(args.expectedSourceHash) || args.expectedSourceHash !== current.hash)) throw new Error("application archive changed since candidate generation");
   if (current.version !== candidate.version || current.hash === candidate.hash) throw new Error("candidate must change the same application version");
   const source = real(args.source || __dirname), replacement = Object.entries(FILES).map(([name, src]) => ({ name, data: fs.readFileSync(path.join(source, src)) }));
-  if (args.dryRun) return { state: "dry-run", version: "0.2.0", appVersion: current.version, before: current.hash, after: candidate.hash, files: replacement.map(f => f.name) };
+  if (args.dryRun) return { state: "dry-run", version: "0.2.1", appVersion: current.version, before: current.hash, after: candidate.hash, files: replacement.map(f => f.name) };
   (hooks.checkClosed || checkClosed)();
   if (!fs.existsSync(args.python)) throw new Error("existing Python environment is required");
   if (process.platform === "win32" && /^python(?:\d+(?:\.\d+)*)?\.exe$/i.test(path.basename(args.python)) && !fs.existsSync(path.join(path.dirname(args.python), path.basename(args.python).replace(/^python/i, "pythonw")))) throw new Error("matching windowless Python interpreter is required");
@@ -85,12 +85,12 @@ function apply(args, hooks = {}) {
   let entries;
   let manifest;
   try {
-    directory = fs.mkdtempSync(path.join(root, "v0.2.0-")); fs.chmodSync(directory, 0o700);
+    directory = fs.mkdtempSync(path.join(root, "v0.2.1-")); fs.chmodSync(directory, 0o700);
     entries = snapshot(targets(p), path.join(directory, "before"));
     const originalBytes = fs.readFileSync(p.input);
     if (hash(originalBytes) !== current.hash) throw new Error("application archive changed before feature backup");
     patcher.writeAtomic(path.join(directory, "app.asar.before"), originalBytes);
-    manifest = { schema: 1, featureVersion: "0.2.0", ...p, appVersion: current.version, sourceAsarSha256: current.hash, patchedAsarSha256: candidate.hash, createdAt: new Date().toISOString(), entries, state: "prepared" };
+    manifest = { schema: 1, featureVersion: "0.2.1", ...p, appVersion: current.version, sourceAsarSha256: current.hash, patchedAsarSha256: candidate.hash, createdAt: new Date().toISOString(), entries, state: "prepared" };
     save(directory, manifest);
   } catch (error) {
     discardIncomplete(directory, error, "backup preparation");
@@ -120,7 +120,7 @@ function apply(args, hooks = {}) {
 }
 function restore(args, hooks = {}) {
   const p = paths(args), directory = support.validateTransactionPath(args.transaction), manifest = JSON.parse(fs.readFileSync(path.join(directory, "feature-manifest.json"), "utf8"));
-  if (manifest.schema !== 1 || manifest.featureVersion !== "0.2.0" || manifest.state !== "applied") throw new Error("feature backup is not an applied 0.2.0 transaction");
+  if (manifest.schema !== 1 || manifest.featureVersion !== "0.2.1" || manifest.state !== "applied") throw new Error("feature backup is not an applied 0.2.1 transaction");
   for (const key of Object.keys(p)) if (!same(p[key], manifest[key])) throw new Error("feature backup target path mismatch");
   const current = support.inspectAsarFile(p.input);
   if (current.version !== manifest.appVersion || current.hash !== manifest.patchedAsarSha256) throw new Error("current app version/hash differs from the feature backup");

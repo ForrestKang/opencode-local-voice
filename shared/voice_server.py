@@ -47,7 +47,7 @@ except ImportError:
         from shared import voice_text  # type: ignore[no-redef]
         from shared import voice_secrets  # type: ignore[no-redef]
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PROTOCOL = 1
 SERVICE_NAME = "opencode-local-voice"
 DEFAULT_PORT = 47832
@@ -65,10 +65,11 @@ DEFAULT_MODEL_PATH = "~/.config/opencode/whisper-models/large-v3-turbo"
 CONFIG_FIELDS = {
     "backend", "device", "model_path", "language", "beam_size",
     "cpu_threads", "max_seconds", "idle_seconds", "warmup_on_record",
-    "initial_prompt", "allowed_origins", "port", *voice_text.TEXT_CONFIG_FIELDS,
+    "initial_prompt", "allowed_origins", "port",
+    *voice_text.TEXT_CONFIG_FIELDS, *voice_text.STT_CONFIG_FIELDS,
 }
 CONFIG_PATCH_FIELDS = CONFIG_FIELDS | voice_text.CONFIG_PATCH_CREDENTIAL_FIELDS
-MODEL_FIELDS = {"backend", "device", "model_path", "cpu_threads"}
+MODEL_FIELDS = {"backend", "device", "model_path", "cpu_threads", "stt_base_url", "stt_model"}
 _CUDA_RUNTIME_HANDLES: list[Any] = []
 _CUDA_RUNTIME_PRELOADED: set[str] = set()
 _CUDA_RUNTIME_REGISTERED_DIRS: set[str] = set()
@@ -90,7 +91,7 @@ def _default_config(port: int = DEFAULT_PORT) -> dict[str, Any]:
     config = {
         "backend": "auto",
         "device": "auto",
-        "model_path": os.path.expanduser(DEFAULT_MODEL_PATH),
+        "model_path": "",
         "language": "auto",
         "beam_size": 1,
         "cpu_threads": max(1, min(8, os.cpu_count() or 4)),
@@ -102,6 +103,7 @@ def _default_config(port: int = DEFAULT_PORT) -> dict[str, Any]:
         "port": port,
     }
     config.update(copy.deepcopy(voice_text.DEFAULT_TEXT_CONFIG))
+    config.update(copy.deepcopy(voice_text.DEFAULT_STT_CONFIG))
     return config
 
 
@@ -130,13 +132,20 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("unknown configuration field(s): " + ", ".join(sorted(unknown)))
     result = _default_config()
     result.update(copy.deepcopy(config))
-    if result["backend"] not in ("auto", "faster-whisper", "mlx"):
-        raise ConfigError("backend must be auto, faster-whisper, or mlx")
+    if result["backend"] not in ("auto", "apple-speech", "openai-api", "faster-whisper", "mlx"):
+        raise ConfigError("backend must be auto, apple-speech, openai-api, faster-whisper, or mlx")
     if result["device"] not in ("auto", "cuda", "cpu"):
         raise ConfigError("device must be auto, cuda, or cpu")
-    if not isinstance(result["model_path"], str) or not result["model_path"].strip():
-        raise ConfigError("model_path must be a non-empty local directory path")
-    result["model_path"] = os.path.expanduser(result["model_path"].strip())
+    if not isinstance(result["model_path"], str):
+        raise ConfigError("model_path must be a string")
+    cleaned_model_path = result["model_path"].strip()
+    if result["backend"] in ("faster-whisper", "mlx") and not cleaned_model_path:
+        raise ConfigError("model_path must be a non-empty local directory path for local Whisper/MLX")
+    result["model_path"] = os.path.expanduser(cleaned_model_path) if cleaned_model_path else ""
+    try:
+        result.update(voice_text.validate_stt_config(result))
+    except voice_text.TextConfigError as exc:
+        raise ConfigError(str(exc)) from exc
     language = result["language"]
     if not isinstance(language, str) or not language or len(language) > 32:
         raise ConfigError("language must be auto or a short language code")
@@ -273,6 +282,8 @@ class ConfigStore:
         return validate_config(cfg)
 
     def _read_or_initialize_config(self) -> dict[str, Any]:
+        self.stt_secret_store = voice_secrets.SecretStore(self.home, "stt_api_key", "STT")
+        self.stt_key_path = self.stt_secret_store.path
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
@@ -287,6 +298,13 @@ class ConfigStore:
                     self.secret_store.migrate_legacy_text(legacy_key)
                 except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
                     raise ConfigError("legacy rewrite credential could not be migrated") from exc
+            legacy_stt_key = raw.pop("stt_api_key", None)
+            if legacy_stt_key is not None:
+                try:
+                    legacy_stt_key = voice_text.validate_stt_api_key(legacy_stt_key)
+                    self.stt_secret_store.migrate_legacy_text(legacy_stt_key)
+                except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
+                    raise ConfigError("legacy STT credential could not be migrated") from exc
             cfg = validate_config(raw)
             # Add newly introduced defaults to older installations atomically.
             if cfg != raw:
@@ -338,15 +356,28 @@ class ConfigStore:
         except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
             raise ConfigError("rewrite credential file is invalid") from exc
 
+    def _read_stt_api_key(self) -> str:
+        try:
+            key = self.stt_secret_store.read()
+            return voice_text.validate_stt_api_key(key)
+        except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
+            raise ConfigError("STT credential file is invalid") from exc
+
     def get_rewrite_api_key(self) -> str:
         """Internal credential accessor. Never include this value in public JSON."""
         with self._lock:
             return self._read_rewrite_api_key()
 
+    def get_stt_api_key(self) -> str:
+        """Internal STT credential accessor. Never include this value in public JSON."""
+        with self._lock:
+            return self._read_stt_api_key()
+
     def public(self) -> dict[str, Any]:
         with self._lock:
             config = copy.deepcopy(self._config)
             config["rewrite_key_configured"] = bool(self._read_rewrite_api_key())
+            config["stt_key_configured"] = bool(self._read_stt_api_key())
             return config
 
     def _write_rewrite_api_key_atomic(self, key: str) -> None:
@@ -354,6 +385,12 @@ class ConfigStore:
             self.secret_store.write(key)
         except voice_secrets.SecretStorageError as exc:
             raise OSError("could not persist rewrite credential") from exc
+
+    def _write_stt_api_key_atomic(self, key: str) -> None:
+        try:
+            self.stt_secret_store.write(key)
+        except voice_secrets.SecretStorageError as exc:
+            raise OSError("could not persist STT credential") from exc
 
     def update(self, patch: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
         if not isinstance(patch, dict):
@@ -372,16 +409,41 @@ class ConfigStore:
                     new_key = voice_text.validate_rewrite_api_key(patch["rewrite_api_key"])
                 except voice_text.TextConfigError as exc:
                     raise ConfigError(str(exc)) from exc
+            has_new_stt_key = "stt_api_key" in patch
+            new_stt_key = ""
+            old_stt_key = self._read_stt_api_key()
+            if has_new_stt_key:
+                try:
+                    new_stt_key = voice_text.validate_stt_api_key(patch["stt_api_key"])
+                except voice_text.TextConfigError as exc:
+                    raise ConfigError(str(exc)) from exc
             new_config = validate_config({**self._config, **public_patch})
             changed = {key for key in CONFIG_FIELDS if new_config[key] != self._config[key]}
             credential_changed = has_new_key and new_key != old_key
+            stt_credential_changed = has_new_stt_key and new_stt_key != old_stt_key
             if credential_changed:
                 changed.add("rewrite_api_key")
                 self._write_rewrite_api_key_atomic(new_key)
+            if stt_credential_changed:
+                try:
+                    changed.add("stt_api_key")
+                    self._write_stt_api_key_atomic(new_stt_key)
+                except Exception:
+                    if credential_changed:
+                        try:
+                            self._write_rewrite_api_key_atomic(old_key)
+                        except Exception as rollback_exc:
+                            raise OSError("could not safely roll back credential update") from rollback_exc
+                    raise
             try:
-                if changed - {"rewrite_api_key"}:
+                if changed - voice_text.CONFIG_PATCH_CREDENTIAL_FIELDS:
                     self._write_atomic(new_config)
             except Exception:
+                if stt_credential_changed:
+                    try:
+                        self._write_stt_api_key_atomic(old_stt_key)
+                    except Exception as rollback_exc:
+                        raise OSError("could not safely roll back STT credential update") from rollback_exc
                 if credential_changed:
                     try:
                         self._write_rewrite_api_key_atomic(old_key)
@@ -635,13 +697,135 @@ class MlxWhisperEngine:
         return str(result.get("text", "")).strip(), result.get("language")
 
 
+import importlib.util
+import shutil
+import subprocess
+import tempfile
+
+
+def apple_speech_helper_info() -> Optional[tuple[str, Path]]:
+    """Locate macOS native Speech helper binary or Swift source if runnable."""
+    if sys.platform != "darwin":
+        return None
+    override = os.environ.get("OPENCODE_VOICE_APPLE_SPEECH", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return ("binary", candidate)
+    here = Path(__file__).resolve()
+    for candidate in (here.with_name("oc-apple-speech"), here.parent.parent / "macos" / "oc-apple-speech"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return ("binary", candidate)
+    swift_bin = shutil.which("swift")
+    if swift_bin:
+        for candidate in (here.with_name("oc_apple_speech.swift"), here.parent.parent / "macos" / "oc_apple_speech.swift"):
+            if candidate.is_file():
+                return ("swift", candidate)
+    return None
+
+
+def local_whisper_installed() -> bool:
+    return importlib.util.find_spec("faster_whisper") is not None
+
+
+def local_mlx_installed() -> bool:
+    return _is_apple_silicon() and importlib.util.find_spec("mlx_whisper") is not None
+
+
+def capabilities_snapshot() -> dict[str, Any]:
+    return {
+        "apple_speech": apple_speech_helper_info() is not None,
+        "local_whisper": local_whisper_installed(),
+        "mlx": local_mlx_installed(),
+        "openai_api": True,
+    }
+
+
+def resolve_backend(config: dict[str, Any]) -> str:
+    """Resolve the active recognition backend from platform capabilities and settings."""
+    backend = config.get("backend", "auto")
+    if backend != "auto":
+        return backend
+    has_api = bool(str(config.get("stt_base_url", "")).strip() and str(config.get("stt_model", "")).strip())
+    has_model = bool(str(config.get("model_path", "")).strip())
+    if sys.platform == "darwin" and apple_speech_helper_info() is not None and not has_api:
+        return "apple-speech"
+    if has_api:
+        return "openai-api"
+    if has_model:
+        if _is_apple_silicon() and config.get("device") == "auto" and local_mlx_installed():
+            return "mlx"
+        return "faster-whisper"
+    raise ConfigError("未配置语音识别：请在「设置 → 语音输入」填写兼容 STT 接口（免下载模型），或安装可选本地模型。")
+
+
+class AppleSpeechEngine:
+    """Invoke macOS SFSpeechRecognizer native helper with zero model download."""
+
+    backend_name = "apple-speech"
+    device_name = "apple-speech"
+
+    @classmethod
+    def transcribe_wav(cls, wav_bytes: bytes, *, language: str = "auto",
+                       timeout: int = 45, should_cancel: Optional[Callable[[], bool]] = None) -> str:
+        helper = apple_speech_helper_info()
+        if helper is None:
+            raise RuntimeError("当前系统未检测到 macOS 原生语音识别辅助程序（oc-apple-speech）")
+        kind, helper_path = helper
+        fd, tmp_name = tempfile.mkstemp(prefix="oc-apple-speech-", suffix=".wav")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        proc = None
+        try:
+            tmp_path.write_bytes(wav_bytes)
+            cmd = [str(helper_path)] if kind == "binary" else ["swift", str(helper_path)]
+            cmd.extend(["--audio", str(tmp_path), "--language", language or "auto"])
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+            deadline = time.monotonic() + max(10, int(timeout))
+            while proc.poll() is None:
+                if should_cancel and should_cancel():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    raise RuntimeError("recognition cancelled")
+                if time.monotonic() >= deadline:
+                    proc.terminate()
+                    raise RuntimeError("macOS 系统语音识别超时")
+                time.sleep(0.05)
+            stdout_data, stderr_data = proc.communicate()
+            if proc.returncode != 0:
+                err_msg = (stderr_data or stdout_data or "").strip()[:240]
+                raise RuntimeError(err_msg or f"macOS 系统语音识别失败 (exit {proc.returncode})")
+            try:
+                payload = json.loads(stdout_data.strip() or "{}")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("macOS 原生语音识别返回了无效输出") from exc
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(str(payload["error"])[:240])
+            text = payload.get("text", "") if isinstance(payload, dict) else ""
+            if not isinstance(text, str):
+                raise RuntimeError("macOS 原生语音识别结果格式无效")
+            return text.strip()
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def create_engine(config: dict[str, Any]):
     backend = config["backend"]
-    if backend == "mlx" or (backend == "auto" and config["device"] == "auto" and _is_apple_silicon()):
+    if backend == "auto":
+        backend = resolve_backend(config)
+    if backend == "mlx":
         if not _is_apple_silicon():
             raise RuntimeError("MLX backend requires Apple Silicon macOS")
         return MlxWhisperEngine(config)
-    return FasterWhisperEngine(config)
+    if backend == "faster-whisper":
+        return FasterWhisperEngine(config)
+    raise RuntimeError(f"backend {backend} runs in lightweight mode and has no Whisper worker engine")
 
 
 def recognition_worker_main(config: dict[str, Any], in_queue: Any, out_queue: Any,
@@ -839,14 +1023,17 @@ class Job:
 
 class Coordinator:
     """Bounded in-memory jobs and one persistent, replaceable worker process."""
-    def __init__(self, config: dict[str, Any], worker_factory: Callable = ProcessWorker,
+    def __init__(self, config: dict[str, Any], worker_factory: Optional[Callable] = None,
                  result_ttl: int = RESULT_TTL_SECONDS, tombstone_ttl: int = CANCEL_TOMBSTONE_SECONDS,
-                 max_retained_jobs: int = MAX_RETAINED_JOBS, rewrite_api_key: str = ""):
+                 max_retained_jobs: int = MAX_RETAINED_JOBS, rewrite_api_key: str = "",
+                 stt_api_key: str = ""):
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self.config = copy.deepcopy(config)
         self.rewrite_api_key = rewrite_api_key
-        self.worker_factory = worker_factory
+        self.stt_api_key = stt_api_key
+        self._custom_worker_factory = worker_factory is not None and worker_factory is not ProcessWorker
+        self.worker_factory = ProcessWorker if worker_factory is None else worker_factory
         self.result_ttl = result_ttl
         self.tombstone_ttl = tombstone_ttl
         self.max_retained_jobs = max(1, int(max_retained_jobs))
@@ -856,6 +1043,8 @@ class Coordinator:
         self.worker: Optional[Any] = None
         self.worker_generation = 0
         self.worker_stopping = False
+        self._lightweight_generation = 0
+        self._lightweight_thread: Optional[threading.Thread] = None
         self.active_id: Optional[str] = None
         self.model_state = "unloaded"
         self.backend: Optional[str] = None
@@ -866,6 +1055,21 @@ class Coordinator:
         self._stopping = False
         self._thread = threading.Thread(target=self._run, name="voice-job-coordinator", daemon=True)
         self._thread.start()
+
+    def _uses_lightweight(self, config: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[str], Optional[str]]:
+        cfg = config if config is not None else self.config
+        backend = cfg.get("backend", "auto")
+        if backend in ("openai-api", "apple-speech"):
+            return True, backend, None
+        if backend in ("faster-whisper", "mlx"):
+            return False, backend, None
+        try:
+            resolved = resolve_backend(cfg)
+            return resolved in ("openai-api", "apple-speech"), resolved, None
+        except ConfigError as exc:
+            if self._custom_worker_factory:
+                return False, None, None
+            return True, None, str(exc)
 
     def _is_live(self, job: Job) -> bool:
         return job.state in ("queued", "loading", "transcribing", "rewriting")
@@ -929,6 +1133,24 @@ class Coordinator:
             if self._stopping:
                 raise ServiceStoppingError("service is shutting down")
             self._prune_locked()
+            is_lightweight, resolved, _ = self._uses_lightweight(self.config)
+            if is_lightweight:
+                if self.last_warmup_id and self.last_warmup_id in self.jobs:
+                    return self.jobs[self.last_warmup_id]
+                if not self._make_room_locked():
+                    raise QueueLimitError("voice job retention limit is full")
+                job = Job("warmup-" + str(uuid.uuid4()), None, True)
+                job.state = "done"
+                job.timings = {"queue_seconds": 0.0, "load_seconds": 0.0, "inference_seconds": 0.0,
+                               "total_seconds": 0.0, "audio_seconds": 0.0}
+                job.updated = time.monotonic()
+                if resolved:
+                    self.backend = resolved
+                    self.device = resolved
+                    self.model_state = "ready"
+                self.jobs[job.id] = job
+                self.last_warmup_id = job.id
+                return job
             for job in self.jobs.values():
                 if job.warmup and self._is_live(job):
                     return job
@@ -972,22 +1194,26 @@ class Coordinator:
             return True
 
     def update_config(self, config: dict[str, Any], changed: set[str],
-                      rewrite_api_key: Optional[str] = None) -> None:
+                      rewrite_api_key: Optional[str] = None,
+                      stt_api_key: Optional[str] = None) -> None:
         with self._condition:
             if self.has_live_jobs():
                 raise RuntimeError("configuration cannot change while a job is active")
             self.config = copy.deepcopy(config)
             if rewrite_api_key is not None:
                 self.rewrite_api_key = rewrite_api_key
+            if stt_api_key is not None:
+                self.stt_api_key = stt_api_key
             self.last_error = None
             self.last_error_code = None
-            if changed & MODEL_FIELDS and self.worker is not None:
-                worker, self.worker = self.worker, None
-                self.worker_generation += 1
+            if changed & MODEL_FIELDS:
+                if self.worker is not None:
+                    worker, self.worker = self.worker, None
+                    self.worker_generation += 1
+                    worker.stop()
                 self.model_state = "unloaded"
                 self.backend = None
                 self.device = None
-                worker.stop()
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         worker_to_stop = None
@@ -1002,6 +1228,7 @@ class Coordinator:
             if self.active_id == job_id:
                 worker_to_stop, self.worker = self.worker, None
                 self.worker_generation += 1
+                self._lightweight_generation += 1
                 self.worker_stopping = worker_to_stop is not None
                 self.active_id = None
                 self.model_state = "unloaded"
@@ -1044,6 +1271,7 @@ class Coordinator:
                 return None
             worker_to_stop, self.worker = self.worker, None
             self.worker_generation += 1
+            self._lightweight_generation += 1
             self.worker_stopping = worker_to_stop is not None
             self.active_id = None
             self.model_state = "unloaded" if worker_to_stop is not None else "ready"
@@ -1065,9 +1293,14 @@ class Coordinator:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            is_lightweight, resolved, _ = self._uses_lightweight(self.config)
             return {
                 "model_state": self.model_state,
                 "backend": self.backend or self.config["backend"],
+                "resolved_backend": resolved,
+                "configured": resolved is not None,
+                "runtime_mode": "lightweight" if is_lightweight else "local-model",
+                "capabilities": capabilities_snapshot(),
                 "device": self.device or self.config["device"],
                 "queue_depth": len(self.pending),
                 "active_jobs": 1 if self.active_id else 0,
@@ -1163,6 +1396,127 @@ class Coordinator:
                 self.worker_stopping = False
                 self._condition.notify_all()
 
+    def _lightweight_is_cancelled(self, generation: int, job_id: str) -> bool:
+        with self._lock:
+            if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
+                return True
+            job = self.jobs.get(job_id)
+            return job is None or job.state == "cancelled"
+
+    def _run_lightweight_job(self, task: dict[str, Any], generation: int, resolved_backend: str) -> None:
+        job_id = task["id"]
+        task_config = task["config"]
+        started = time.monotonic()
+        with self._condition:
+            if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
+                return
+            job = self.jobs.get(job_id)
+            if not job or job.state == "cancelled":
+                return
+            job.state = "transcribing"
+            job.updated = time.monotonic()
+            self.model_state = "transcribing"
+            self.backend = resolved_backend
+            self.device = resolved_backend
+            self._condition.notify_all()
+        try:
+            inf_started = time.monotonic()
+            if task.get("warmup"):
+                raw_text = ""
+            elif resolved_backend == "apple-speech":
+                raw_text = AppleSpeechEngine.transcribe_wav(
+                    task["audio"],
+                    language=task_config.get("language", "auto"),
+                    timeout=max(20, int(task_config.get("stt_timeout", 30)) + 15),
+                    should_cancel=lambda: self._lightweight_is_cancelled(generation, job_id),
+                )
+            elif resolved_backend == "openai-api":
+                hint, _hotwords = voice_text.build_asr_hints(task_config, maximum=500)
+                raw_text = voice_text.transcribe_openai_compatible(
+                    task["audio"],
+                    task_config,
+                    api_key=task.get("stt_api_key", ""),
+                    language=task_config.get("language", "auto"),
+                    prompt=hint,
+                )
+            else:
+                raise RuntimeError(f"unsupported lightweight backend: {resolved_backend}")
+            inf_seconds = time.monotonic() - inf_started
+            if self._lightweight_is_cancelled(generation, job_id):
+                return
+            lang = task_config.get("language", "auto")
+            recognized_language = lang if lang in ("zh", "en") else None
+            local_started = time.monotonic()
+            local_warning = None
+            try:
+                local_text = voice_text.local_transform(raw_text, task_config, recognized_language)
+            except Exception:
+                local_text = raw_text
+                local_warning = "文本整理未完成，已保留本地识别结果。"
+            local_seconds = time.monotonic() - local_started
+            text = local_text
+            processing_warning = local_warning
+            rewrite_seconds = 0.0
+            timings: dict[str, float] = {
+                "queue_seconds": task.get("queue_seconds", 0.0),
+                "load_seconds": 0.0,
+                "inference_seconds": inf_seconds,
+                "local_seconds": local_seconds,
+            }
+            if not task.get("warmup") and task_config.get("text_mode") == "ai" and local_warning is None:
+                with self._condition:
+                    if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
+                        return
+                    job = self.jobs.get(job_id)
+                    if not job or job.state == "cancelled":
+                        return
+                    job.state = "rewriting"
+                    job.raw_text = raw_text
+                    job.local_text = local_text
+                    job.timings = dict(timings)
+                    job.updated = time.monotonic()
+                    self.model_state = "rewriting"
+                    self._condition.notify_all()
+                rewrite_started = time.monotonic()
+                text, processing_warning = voice_text.rewrite_text(
+                    local_text,
+                    task_config,
+                    api_key=task.get("rewrite_api_key", ""),
+                    recognized_language=recognized_language,
+                )
+                rewrite_seconds = time.monotonic() - rewrite_started
+            timings["rewrite_seconds"] = rewrite_seconds
+            timings["total_seconds"] = time.monotonic() - started + task.get("queue_seconds", 0.0)
+            with self._condition:
+                if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
+                    return
+                job = self.jobs.get(job_id)
+                if not job or job.state == "cancelled":
+                    return
+                job.state = "done"
+                job.audio = None
+                job.text = "" if task.get("warmup") else text
+                if not task.get("warmup"):
+                    job.raw_text = raw_text
+                    job.local_text = local_text
+                    job.processing_warning = processing_warning
+                job.timings = timings
+                job.updated = time.monotonic()
+                self.backend = resolved_backend
+                self.device = resolved_backend
+                self.model_state = "ready"
+                self.last_error = None
+                self.last_error_code = None
+                self.active_id = None
+                self._condition.notify_all()
+        except Exception as exc:
+            with self._condition:
+                if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
+                    return
+                code = "stt_not_configured" if isinstance(exc, voice_text.TextConfigError) else "recognition_failed"
+                self._fail_active_locked(str(exc), code=code)
+                self._condition.notify_all()
+
     def _run(self) -> None:
         while True:
             task = None
@@ -1170,6 +1524,8 @@ class Coordinator:
             create_worker = False
             factory_config = None
             factory_generation = None
+            lightweight_backend = None
+            lightweight_gen = None
             with self._condition:
                 if self._stopping:
                     break
@@ -1182,26 +1538,62 @@ class Coordinator:
                     if job and job.state == "queued":
                         self.active_id = job_id
                         job.started = time.monotonic()
-                        job.state = "loading"
-                        job.updated = job.started
-                        task = {"id": job_id, "warmup": job.warmup, "audio": job.audio,
-                                "queue_seconds": max(0.0, job.started - job.created),
-                                "config": copy.deepcopy(self.config),
-                                "rewrite_api_key": self.rewrite_api_key}
-                        job.audio = None
-                        if self.worker is None:
-                            create_worker = True
-                            factory_config = copy.deepcopy(self.config)
-                            factory_generation = self.worker_generation
+                        is_lightweight, resolved, cfg_err = self._uses_lightweight(self.config)
+                        if is_lightweight:
+                            if cfg_err:
+                                self._fail_active_locked(cfg_err, code="stt_not_configured")
+                                job.audio = None
+                                self._condition.notify_all()
+                                continue
+                            worker_to_stop, self.worker = self.worker, None
+                            if worker_to_stop is not None:
+                                self.worker_generation += 1
+                                worker_to_stop.stop(terminate=False)
+                            job.state = "loading"
+                            job.updated = job.started
+                            lightweight_gen = self._lightweight_generation
+                            lightweight_backend = resolved
+                            task = {"id": job_id, "warmup": job.warmup, "audio": job.audio,
+                                    "queue_seconds": max(0.0, job.started - job.created),
+                                    "config": copy.deepcopy(self.config),
+                                    "rewrite_api_key": self.rewrite_api_key,
+                                    "stt_api_key": self.stt_api_key}
+                            job.audio = None
                         else:
-                            worker = self.worker
-                if worker is None and not create_worker:
+                            job.state = "loading"
+                            job.updated = job.started
+                            task = {"id": job_id, "warmup": job.warmup, "audio": job.audio,
+                                    "queue_seconds": max(0.0, job.started - job.created),
+                                    "config": copy.deepcopy(self.config),
+                                    "rewrite_api_key": self.rewrite_api_key}
+                            job.audio = None
+                            if self.worker is None:
+                                create_worker = True
+                                factory_config = copy.deepcopy(self.config)
+                                factory_generation = self.worker_generation
+                            else:
+                                worker = self.worker
+                if worker is None and not create_worker and lightweight_backend is None:
                     worker = self.worker
                 generation = self.worker_generation
                 active_id = self.active_id
+                if task is None and active_id is None and not create_worker:
+                    self._condition.wait(timeout=0.2)
+                    continue
                 if task is None and worker is None and not create_worker:
                     self._condition.wait(timeout=0.2)
                     continue
+            if lightweight_backend is not None and task is not None:
+                thread = threading.Thread(
+                    target=self._run_lightweight_job,
+                    args=(task, lightweight_gen, lightweight_backend),
+                    name="voice-lightweight-job",
+                    daemon=True,
+                )
+                with self._lock:
+                    self._lightweight_thread = thread
+                thread.start()
+                continue
             if create_worker:
                 try:
                     new_worker = self.worker_factory(factory_config)
@@ -1302,9 +1694,14 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 class VoiceApp:
     def __init__(self, store: ConfigStore, coordinator: Optional[Coordinator] = None):
         self.store = store
-        self.coordinator = coordinator or Coordinator(store.get(), rewrite_api_key=store.get_rewrite_api_key())
+        self.coordinator = coordinator or Coordinator(
+            store.get(),
+            rewrite_api_key=store.get_rewrite_api_key(),
+            stt_api_key=store.get_stt_api_key(),
+        )
         if coordinator is not None:
             coordinator.rewrite_api_key = store.get_rewrite_api_key()
+            coordinator.stt_api_key = store.get_stt_api_key()
         self.last_access = time.monotonic()
         self._access_lock = threading.Lock()
         self._stopping = threading.Event()
@@ -1339,7 +1736,7 @@ def _content_length(handler: BaseHTTPRequestHandler, maximum: int) -> int:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "OpenCodeLocalVoice/0.2.0"
+    server_version = "OpenCodeLocalVoice/0.2.1"
     sys_version = ""
 
     @property
@@ -1439,6 +1836,7 @@ class Handler(BaseHTTPRequestHandler):
         # The renderer may pass the public GET /config object. Ignore its
         # computed status bit, and apply all overrides only to this request.
         overrides.pop("rewrite_key_configured", None)
+        overrides.pop("stt_key_configured", None)
         if set(overrides) - CONFIG_FIELDS:
             raise ConfigError("preview config contains an unsupported field")
         config = validate_config({**self.app.store.get(), **overrides})
@@ -1449,6 +1847,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise ConfigError(str(exc)) from exc
         else:
             api_key = self.app.store.get_rewrite_api_key()
+        return config, api_key
+
+    def _preview_stt_config_and_key(self, body: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        unknown = set(body) - {"config", "stt_api_key"}
+        if unknown:
+            raise ConfigError("request contains an unknown field")
+        overrides = body.get("config", {})
+        if not isinstance(overrides, dict):
+            raise ConfigError("config must be a JSON object")
+        overrides = dict(overrides)
+        overrides.pop("rewrite_key_configured", None)
+        overrides.pop("stt_key_configured", None)
+        if set(overrides) - CONFIG_FIELDS:
+            raise ConfigError("stt test config contains an unsupported field")
+        config = validate_config({**self.app.store.get(), **overrides})
+        if "stt_api_key" in body:
+            try:
+                api_key = voice_text.validate_stt_api_key(body["stt_api_key"])
+            except voice_text.TextConfigError as exc:
+                raise ConfigError(str(exc)) from exc
+        else:
+            api_key = self.app.store.get_stt_api_key()
         return config, api_key
 
     def _preview_text(self, body: dict[str, Any], *, fixed_test: bool = False) -> dict[str, Any]:
@@ -1599,6 +2019,13 @@ class Handler(BaseHTTPRequestHandler):
                         raise ConfigError(str(exc)) from exc
                     if requested_key != self.app.store.get_rewrite_api_key():
                         changed.add("rewrite_api_key")
+                if "stt_api_key" in patch:
+                    try:
+                        requested_stt_key = voice_text.validate_stt_api_key(patch["stt_api_key"])
+                    except voice_text.TextConfigError as exc:
+                        raise ConfigError(str(exc)) from exc
+                    if requested_stt_key != self.app.store.get_stt_api_key():
+                        changed.add("stt_api_key")
                 if self.app.coordinator.has_live_jobs() and changed:
                     self._send_json(409, {"error": "configuration cannot change while a job is active"})
                     return
@@ -1607,7 +2034,8 @@ class Handler(BaseHTTPRequestHandler):
                 updated, changed = self.app.store.update(patch)
                 if changed:
                     self.app.coordinator.update_config(updated, changed,
-                                                       self.app.store.get_rewrite_api_key())
+                                                       self.app.store.get_rewrite_api_key(),
+                                                       self.app.store.get_stt_api_key())
             self._send_json(200, self.app.store.public())
         except OverflowError as exc:
             self._send_json(413, {"error": str(exc)})
@@ -1669,6 +2097,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(413, {"ok": False, "message": "AI 测试请求过大。"})
             except ValueError:
                 self._send_json(400, {"ok": False, "message": "AI 测试设置无效。"})
+            finally:
+                self.app._preview_slots.release()
+            return
+        if path == "/v1/stt/test":
+            if not self.app._preview_slots.acquire(blocking=False):
+                self._send_json(429, {"ok": False, "message": "STT 测试并发已满，请稍后重试。",
+                                      "code": "preview_busy"})
+                return
+            try:
+                body = self._read_json()
+                config, api_key = self._preview_stt_config_and_key(body)
+                result = voice_text.test_stt_connection(config, api_key=api_key)
+                self._send_json(200 if result["ok"] else 502, result)
+            except OverflowError:
+                self._send_json(413, {"ok": False, "message": "STT 测试请求过大。"})
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "message": str(exc)[:200] or "STT 测试设置无效。"})
             finally:
                 self.app._preview_slots.release()
             return

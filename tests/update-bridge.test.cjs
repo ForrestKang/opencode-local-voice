@@ -27,7 +27,7 @@ function fixture(t) {
   fs.writeFileSync(installerPath, "fixture installer\n");
   const active = {
     schema: 1,
-    featureVersion: "0.2.0",
+    featureVersion: "0.2.1",
     packageRoot,
     packageManifestSha256: crypto.createHash("sha256").update(manifest).digest("hex"),
     node: process.execPath,

@@ -65,9 +65,11 @@ def _dpapi(data: bytes, *, decrypt: bool) -> bytes:
 
 
 class SecretStore:
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, filename: str = "rewrite_api_key", label: str = "rewrite"):
         self.home = Path(home)
-        self.path = self.home / "rewrite_api_key"
+        self.filename = filename
+        self.label = label
+        self.path = self.home / filename
 
     def _protect(self, value: str) -> bytes:
         raw = value.encode("utf-8")
@@ -81,22 +83,22 @@ class SecretStore:
                 ciphertext = base64.b64decode(raw[len(_DPAPI_PREFIX):].strip(), validate=True)
                 raw = _dpapi(ciphertext, decrypt=True)
             except Exception as exc:
-                raise SecretStorageError("rewrite credential cannot be decrypted for this Windows user") from exc
+                raise SecretStorageError(f"{self.label} credential cannot be decrypted for this Windows user") from exc
         elif os.name == "nt":
             # Migrate an older plaintext file to the user's DPAPI store.
             try:
                 legacy = raw.rstrip(b"\r\n").decode("utf-8")
             except UnicodeDecodeError as exc:
-                raise SecretStorageError("legacy rewrite credential is invalid") from exc
+                raise SecretStorageError(f"legacy {self.label} credential is invalid") from exc
             if (not legacy or len(legacy) > 4096 or
                     any(ord(char) < 0x20 or ord(char) > 0x7E for char in legacy)):
-                raise SecretStorageError("legacy rewrite credential is invalid")
+                raise SecretStorageError(f"legacy {self.label} credential is invalid")
             self.write(legacy)
             return legacy
         try:
             return raw.rstrip(b"\r\n").decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise SecretStorageError("rewrite credential file is invalid") from exc
+            raise SecretStorageError(f"{self.label} credential file is invalid") from exc
 
     def read(self) -> str:
         try:
@@ -104,18 +106,18 @@ class SecretStore:
         except FileNotFoundError:
             return ""
         except OSError as exc:
-            raise SecretStorageError("rewrite credential file is unreadable") from exc
+            raise SecretStorageError(f"{self.label} credential file is unreadable") from exc
         try:
             value = self._unprotect(raw)
         except SecretStorageError:
             raise
         except Exception as exc:
-            raise SecretStorageError("rewrite credential file is invalid") from exc
+            raise SecretStorageError(f"{self.label} credential file is invalid") from exc
         if os.name != "nt":
             try:
                 os.chmod(self.path, stat.S_IRUSR | stat.S_IWUSR)
             except OSError as exc:
-                raise SecretStorageError("could not secure rewrite credential file") from exc
+                raise SecretStorageError(f"could not secure {self.label} credential file") from exc
         return value
 
     def write(self, value: str) -> None:
@@ -125,11 +127,11 @@ class SecretStore:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                raise SecretStorageError("could not clear rewrite credential") from exc
+                raise SecretStorageError(f"could not clear {self.label} credential") from exc
             return
         try:
             data = self._protect(value)
-            tmp = self.home / (".rewrite-key-" + secrets.token_hex(8) + ".tmp")
+            tmp = self.home / (f".{self.filename}-" + secrets.token_hex(8) + ".tmp")
             fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 with os.fdopen(fd, "wb") as output:
@@ -149,7 +151,7 @@ class SecretStore:
         except SecretStorageError:
             raise
         except Exception as exc:
-            raise SecretStorageError("could not persist rewrite credential") from exc
+            raise SecretStorageError(f"could not persist {self.label} credential") from exc
 
     def migrate_legacy_text(self, value: str) -> str:
         """Move a key found inside legacy config.json to the private store."""

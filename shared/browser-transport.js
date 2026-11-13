@@ -78,6 +78,7 @@
       useLocal: function (id) { if (!idValid(id)) throw failure("INVALID_JOB", "任务标识无效"); return call("POST", "/v1/jobs/" + id + "/use-local", {}) },
       previewText: async function (text, config, key) { await ensure(); return request("POST", "/v1/text", Object.assign({ text: text, config: config || {} }, key !== undefined ? { rewrite_api_key: key } : {}), false, {}, 75000) },
       testRewrite: async function (config, key) { await ensure(); return request("POST", "/v1/rewrite/test", Object.assign({ config: config || {} }, key !== undefined ? { rewrite_api_key: key } : {}), false, {}, 75000) },
+      testStt: async function (config, key) { await ensure(); return request("POST", "/v1/stt/test", Object.assign({ config: config || {} }, key !== undefined ? { stt_api_key: key } : {}), false, {}, 75000) },
       onProgress: function (listener) { listeners.add(listener); return function () { listeners.delete(listener) } } }
   }
   root.createOcVoiceTransport = createBrowserTransport

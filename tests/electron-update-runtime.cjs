@@ -73,7 +73,7 @@ function fixture(root) {
   const home = path.join(root, "fixture-home");
   const runtime = path.join(root, "fixture-runtime");
   const maintenanceRoot = path.join(root, "maintenance");
-  const backupRoot = path.join(maintenanceRoot, "backups", "0.2.0");
+  const backupRoot = path.join(maintenanceRoot, "backups", "0.2.1");
   const installerPath = path.join(root, "OpenCode-setup.exe");
   const helperPath = path.join(root, "maintenance-helper.cjs");
   const activePath = path.join(home, ".config", "opencode", "voice-maintenance", "active.json");
@@ -90,7 +90,7 @@ function fixture(root) {
   fs.writeFileSync(protectedPath, "candidate-owned simulated user state\n", "utf8");
   const active = {
     schema: 1,
-    featureVersion: "0.2.0",
+    featureVersion: "0.2.1",
     packageRoot: maintenancePackage,
     packageManifestSha256: sha256(manifest),
     // Filled by the parent process. Electron's process.execPath is Electron,

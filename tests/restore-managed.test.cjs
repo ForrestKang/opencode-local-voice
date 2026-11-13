@@ -15,8 +15,8 @@ test("managed restore follows feature-first order and retries maintenance after 
     const home = path.join(root, "home");
     const backupRoot = path.join(root, "backups");
     const maintenanceRoot = path.join(root, "maintenance");
-    const transaction = path.join(maintenanceRoot, "transactions", "0.2.0-maintenance");
-    const feature = path.join(backupRoot, "v0.2.0-feature");
+    const transaction = path.join(maintenanceRoot, "transactions", "0.2.1-maintenance");
+    const feature = path.join(backupRoot, "v0.2.1-feature");
     const packageRoot = path.join(root, "package");
     const trace = path.join(root, "trace.log");
     const activePath = path.join(maintenanceRoot, "active.json");
@@ -37,25 +37,25 @@ test("managed restore follows feature-first order and retries maintenance after 
       "if ($env:OC_MANAGED_FAIL -eq '1' -and -not $DryRun) { $path = Join-Path $Transaction 'maintenance-transaction.json'; $m = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json; $m.state = 'restore-failed'; $m | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path; exit 1 }",
     ].join("\n"));
     const active = {
-      schema: 1, featureVersion: "0.2.0", packageRoot, packageManifestSha256: packageHash,
+      schema: 1, featureVersion: "0.2.1", packageRoot, packageManifestSha256: packageHash,
       node: process.execPath, python: process.execPath, app, home, runtime, backupRoot, maintenanceRoot,
       shortcutReceipt: receiptPath, transactionPath: transaction,
     };
     fs.writeFileSync(activePath, JSON.stringify(active));
     const featureManifest = {
-      schema: 1, featureVersion: "0.2.0", app, input: archive, home, runtime,
+      schema: 1, featureVersion: "0.2.1", app, input: archive, home, runtime,
       appVersion: "1.18.33", sourceAsarSha256: sourceHash, patchedAsarSha256: patchedHash,
       state: "applied", appliedAt: "2026-10-07T00:00:00.000Z",
     };
     fs.writeFileSync(path.join(feature, "feature-manifest.json"), JSON.stringify(featureManifest));
-    const unrelatedFeature = path.join(backupRoot, "v0.2.0-unrelated");
+    const unrelatedFeature = path.join(backupRoot, "v0.2.1-unrelated");
     fs.mkdirSync(unrelatedFeature, { recursive: true });
     fs.writeFileSync(path.join(unrelatedFeature, "feature-manifest.json"), JSON.stringify({
       ...featureManifest, app: path.join(root, "OtherOpenCode"), input: path.join(root, "OtherOpenCode", "resources", "app.asar"),
       state: "applied", appliedAt: "2026-10-07T00:02:00.000Z",
     }));
     const maintenanceManifest = {
-      schema: 1, featureVersion: "0.2.0", state: "applied", transaction,
+      schema: 1, featureVersion: "0.2.1", state: "applied", transaction,
       activePath, receiptPath, packageRoot, packageManifestSha256: packageHash, appPath: app,
     };
     fs.writeFileSync(path.join(transaction, "maintenance-transaction.json"), JSON.stringify(maintenanceManifest));

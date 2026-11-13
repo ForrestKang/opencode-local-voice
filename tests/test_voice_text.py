@@ -374,5 +374,121 @@ class LocalTranscriptTests(unittest.TestCase):
         self.assertIsNone(result["processing_warning"])
 
 
+class OpenAiSttTests(unittest.TestCase):
+    def test_stt_url_normalization_and_validation(self):
+        self.assertEqual(
+            voice_text.normalize_stt_url("https://api.groq.com/openai/v1"),
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+        )
+        self.assertEqual(
+            voice_text.normalize_stt_url("http://127.0.0.1:8000"),
+            "http://127.0.0.1:8000/v1/audio/transcriptions",
+        )
+        for bad in (
+            "http://remote.example.com/v1",
+            "https://user:pass@api.example.com/v1",
+            "https://api.example.com/v1?x=1",
+        ):
+            with self.assertRaises(voice_text.TextConfigError):
+                voice_text.normalize_stt_url(bad)
+        with self.assertRaises(voice_text.TextConfigError):
+            voice_text.validate_stt_config({"stt_timeout": True})
+        with self.assertRaises(voice_text.TextConfigError):
+            voice_text.validate_stt_config({"stt_timeout": 121})
+
+    def test_openai_compatible_multipart_upload_no_redirect_and_secret_redaction(self):
+        captured = {}
+        received_redirect_target = threading.Event()
+
+        class SttHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                captured["path"] = self.path
+                captured["auth"] = self.headers.get("Authorization")
+                captured["content_type"] = self.headers.get("Content-Type", "")
+                captured["body"] = self.rfile.read(length)
+                if self.path.startswith("/fail-secret"):
+                    payload = json.dumps({"error": {"message": "bad key: sk-secret-999"}}).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                payload = json.dumps({"text": "  hello OpenCode  "}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(307)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/v1/audio/transcriptions")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        class RedirectTargetHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                received_redirect_target.set()
+                self.send_response(200)
+                self.end_headers()
+
+        stt_srv = HTTPServer(("127.0.0.1", 0), SttHandler)
+        redir_srv = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        target = HTTPServer(("127.0.0.1", 0), RedirectTargetHandler)
+        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (stt_srv, redir_srv, target)]
+        for t in threads:
+            t.start()
+        try:
+            wav_bytes = voice_text._silent_wav16k()
+            cfg = {"stt_base_url": f"http://127.0.0.1:{stt_srv.server_address[1]}/v1",
+                   "stt_model": "whisper-large-v3-turbo", "stt_timeout": 10}
+            text = voice_text.transcribe_openai_compatible(
+                wav_bytes, cfg, api_key="sk-secret-999", language="zh", prompt="OpenCode")
+            self.assertEqual(text, "hello OpenCode")
+            self.assertEqual(captured["path"], "/v1/audio/transcriptions")
+            self.assertEqual(captured["auth"], "Bearer sk-secret-999")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="model"\r\n\r\nwhisper-large-v3-turbo', captured["body"])
+            self.assertIn(b'name="language"\r\n\r\nzh', captured["body"])
+            self.assertIn(wav_bytes, captured["body"])
+
+            test_ok = voice_text.test_stt_connection(cfg, api_key="sk-secret-999")
+            self.assertTrue(test_ok["ok"], test_ok)
+
+            # Secret must be redacted from error messages
+            fail_cfg = {"stt_base_url": f"http://127.0.0.1:{stt_srv.server_address[1]}/fail-secret/audio/transcriptions",
+                        "stt_model": "whisper-large-v3-turbo", "stt_timeout": 10}
+            with self.assertRaises(RuntimeError) as ctx:
+                voice_text.transcribe_openai_compatible(wav_bytes, fail_cfg, api_key="sk-secret-999")
+            self.assertNotIn("sk-secret-999", str(ctx.exception))
+            self.assertIn("[REDACTED]", str(ctx.exception))
+
+            # Redirect must never forward credentials
+            redir_cfg = {"stt_base_url": f"http://127.0.0.1:{redir_srv.server_address[1]}/v1",
+                         "stt_model": "whisper-1", "stt_timeout": 10}
+            with self.assertRaises(RuntimeError):
+                voice_text.transcribe_openai_compatible(wav_bytes, redir_cfg, api_key="sk-secret-999")
+            self.assertFalse(received_redirect_target.wait(0.2))
+        finally:
+            for s in (stt_srv, redir_srv, target):
+                s.shutdown()
+                s.server_close()
+            for t in threads:
+                t.join(timeout=1)
+
+
 if __name__ == "__main__":
     unittest.main()

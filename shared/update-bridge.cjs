@@ -202,7 +202,7 @@ function requiresAdministrator(active, updater, options) {
 function validateActive(raw, fsImpl, updater, options) {
   const active = asObject(raw, "active.json");
   if (active.schema !== SCHEMA) fail("active.json schema is unsupported");
-  if (active.featureVersion !== "0.2.0") fail("active.json featureVersion is unsupported");
+  if (active.featureVersion !== "0.2.1") fail("active.json featureVersion is unsupported");
   for (const key of ["packageRoot", "node", "python", "pythonw", "app", "home", "runtime", "backupRoot", "maintenanceRoot", "shortcutReceipt"]) absolute(active[key], key);
   if (!isHash(active.packageManifestSha256)) fail("package manifest hash is invalid");
   if (!directory(fsImpl, active.packageRoot)) fail("stable package root is missing");

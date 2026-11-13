@@ -1,4 +1,4 @@
-OpenCode Local Voice V0.2.0 — Windows 维护入口
+OpenCode Local Voice V0.2.1 — Windows 维护入口
 
 日常使用：通过安装器维护后的桌面或开始菜单快捷方式启动 OpenCode。
 语音入口消失：退出 OpenCode，先运行 Repair-Voice.cmd -Check 检查，再运行 Repair-Voice.cmd 修复并启动。

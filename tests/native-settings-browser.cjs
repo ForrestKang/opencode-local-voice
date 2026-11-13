@@ -281,7 +281,7 @@ async function main() {
         await page.waitForTimeout(100);
         const backendTrigger = select("backend").locator('[data-component="select-v2"]');
         const backendBeforeClick = await backendTrigger.innerText();
-        assert.match(backendBeforeClick, /自动选择/);
+        assert.match(backendBeforeClick, /自动（优先免下载方案）/);
         const backendTriggerBox = await backendTrigger.boundingBox();
         await backendTrigger.click();
         const fasterOption = page.getByRole("option", { name: "faster-whisper" });
@@ -303,7 +303,7 @@ async function main() {
         await cpuOption.waitFor();
         const deviceMenu = await page.locator('[data-slot="select-v2-content"][data-expanded]').boundingBox();
         assert.ok(deviceMenu && (deviceMenu.x + deviceMenu.width <= deviceTriggerBox.x || deviceTriggerBox.x + deviceTriggerBox.width <= deviceMenu.x || deviceMenu.y + deviceMenu.height <= deviceTriggerBox.y || deviceTriggerBox.y + deviceTriggerBox.height <= deviceMenu.y), "native device menu must not overlap its trigger near the viewport edge");
-        const listbox = page.locator('[data-slot="select-v2-listbox"]');
+        const listbox = page.locator('[data-slot="select-v2-content"][data-expanded] [data-slot="select-v2-listbox"]');
         const listMetrics = await listbox.evaluate(node => ({ scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, overflowY: getComputedStyle(node).overflowY }));
         assert.ok(listMetrics.clientHeight > 0 && (listMetrics.scrollHeight <= listMetrics.clientHeight || listMetrics.overflowY === "auto" || listMetrics.overflowY === "scroll"), "native device options remain accessible when viewport space is limited");
         await cpuOption.click();
@@ -352,10 +352,14 @@ async function main() {
         assert.equal(await page.locator("#oc-voice-settings-save").isDisabled(), true);
         await page.evaluate(() => { window.settingsMode = "ok"; });
         await page.locator("#oc-voice-settings-reload").click(); await ready();
+        await select("backend").click();
+        await clickOption("faster-whisper");
         await page.locator("#oc-voice-model-path").fill("");
         await page.locator("#oc-voice-settings-save").click();
         await page.waitForFunction(() => document.getElementById("oc-voice-settings-error").textContent.includes("已下载模型"));
         assert.equal(await page.evaluate(() => window.calls.saves.length), 1);
+        await select("backend").click();
+        await clickOption("自动（优先免下载方案）");
         await page.locator("#oc-voice-model-path").fill("/local/test-model");
         await page.evaluate(() => { window.settingsMode = "save-error"; });
         await page.locator("#oc-voice-settings-save").click();

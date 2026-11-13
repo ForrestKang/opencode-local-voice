@@ -19,6 +19,10 @@ function __ocVoiceNativeSettingsV2(props) {
   const [clearRewriteKey, setClearRewriteKey] = ui.createSignal(false);
   const [rewriteTestBusy, setRewriteTestBusy] = ui.createSignal(false);
   const [rewriteTestText, setRewriteTestText] = ui.createSignal("");
+  const [sttKey, setSttKey] = ui.createSignal("");
+  const [clearSttKey, setClearSttKey] = ui.createSignal(false);
+  const [sttTestBusy, setSttTestBusy] = ui.createSignal(false);
+  const [sttTestText, setSttTestText] = ui.createSignal("");
   const [vocabularyStatus, setVocabularyStatus] = ui.createSignal("");
   const [draftActionText, setDraftActionText] = ui.createSignal("");
   let disposed = false;
@@ -35,6 +39,10 @@ function __ocVoiceNativeSettingsV2(props) {
     idle_seconds: 1800,
     warmup_on_record: true,
     initial_prompt: "",
+    stt_base_url: "",
+    stt_model: "",
+    stt_timeout: 30,
+    stt_key_configured: false,
     text_mode: "clean",
     punctuation_mode: "auto",
     space_mode: "preserve",
@@ -54,9 +62,11 @@ function __ocVoiceNativeSettingsV2(props) {
     { value: "en", label: "English" },
   ];
   const backendOptions = [
-    { value: "auto", label: "自动选择" },
-    { value: "faster-whisper", label: "faster-whisper" },
-    { value: "mlx", label: "MLX（Apple Silicon）" },
+    { value: "auto", label: "自动（优先免下载方案）" },
+    { value: "apple-speech", label: "macOS 系统原生识别（零下载 · 纯本地）" },
+    { value: "openai-api", label: "兼容 STT 接口（免下载模型 · 极轻量）" },
+    { value: "faster-whisper", label: "本地 faster-whisper（可选 · 需下载模型）" },
+    { value: "mlx", label: "本地 MLX（Apple Silicon · 可选模型）" },
   ];
   const deviceOptions = [
     { value: "auto", label: "自动选择" },
@@ -116,6 +126,7 @@ function __ocVoiceNativeSettingsV2(props) {
     const input = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const safeInput = { ...input };
     delete safeInput.rewrite_api_key;
+    delete safeInput.stt_api_key;
     return { ...defaults, ...safeInput };
   }
 
@@ -126,6 +137,8 @@ function __ocVoiceNativeSettingsV2(props) {
     setReplacementText(Array.isArray(next.replacements) ? next.replacements.map((item) => `${item.from} => ${item.to}`).join("\n") : "");
     setRewriteKey("");
     setClearRewriteKey(false);
+    setSttKey("");
+    setClearSttKey(false);
     if (typeof props.onConfig === "function") props.onConfig(next);
   }
 
@@ -305,12 +318,18 @@ function __ocVoiceNativeSettingsV2(props) {
     const rewriteBaseUrl = String(currentValue("rewrite_base_url") || "").trim();
     const rewriteModel = String(currentValue("rewrite_model") || "").trim();
     const rewritePrompt = String(currentValue("rewrite_prompt") || "");
+    const sttBaseUrl = String(currentValue("stt_base_url") || "").trim();
+    const sttModel = String(currentValue("stt_model") || "").trim();
+    const backend = String(currentValue("backend") || "auto");
     if (rewriteBaseUrl.length > 2048) throw Object.assign(new Error("AI 接口地址最多 2048 个字符"), { code: "VOICE_VALIDATION" });
     if (rewriteModel.length > 256) throw Object.assign(new Error("AI 模型名称最多 256 个字符"), { code: "VOICE_VALIDATION" });
     if (rewritePrompt.length > 4000) throw Object.assign(new Error("AI 改写提示最多 4000 个字符"), { code: "VOICE_VALIDATION" });
     if (textMode === "ai" && (!rewriteBaseUrl || !rewriteModel)) throw Object.assign(new Error("请填写 AI 兼容接口地址和模型名称"), { code: "VOICE_VALIDATION" });
+    if (sttBaseUrl.length > 2048) throw Object.assign(new Error("STT 接口地址最多 2048 个字符"), { code: "VOICE_VALIDATION" });
+    if (sttModel.length > 200) throw Object.assign(new Error("STT 模型名称最多 200 个字符"), { code: "VOICE_VALIDATION" });
+    if (backend === "openai-api" && (!sttBaseUrl || !sttModel)) throw Object.assign(new Error("请填写兼容 STT 接口地址和模型名称"), { code: "VOICE_VALIDATION" });
     return {
-      backend: String(currentValue("backend") || "auto"),
+      backend,
       device: String(currentValue("device") || "auto"),
       model_path: String(currentValue("model_path") || "").trim(),
       language: String(currentValue("language") || "auto"),
@@ -320,6 +339,9 @@ function __ocVoiceNativeSettingsV2(props) {
       idle_seconds: numberValue("idle_seconds", 30, 86400),
       warmup_on_record: Boolean(currentValue("warmup_on_record")),
       initial_prompt: String(currentValue("initial_prompt") || ""),
+      stt_base_url: sttBaseUrl,
+      stt_model: sttModel,
+      stt_timeout: numberValue("stt_timeout", 5, 120),
       text_mode: textMode,
       punctuation_mode: punctuationMode,
       space_mode: spaceMode,
@@ -337,14 +359,20 @@ function __ocVoiceNativeSettingsV2(props) {
   function numberValue(name, minimum, maximum) {
     const value = Number(currentValue(name));
     if (!Number.isInteger(value) || value < minimum || value > maximum) {
-      const labels = { max_seconds: "最长录音", beam_size: "解码宽度", cpu_threads: "CPU 线程数", idle_seconds: "模型空闲释放", rewrite_timeout: "AI 请求超时" };
+      const labels = { max_seconds: "最长录音", beam_size: "解码宽度", cpu_threads: "CPU 线程数", idle_seconds: "模型空闲释放", rewrite_timeout: "AI 请求超时", stt_timeout: "STT 请求超时" };
       throw Object.assign(new Error((labels[name] || name) + "必须在 " + minimum + " 到 " + maximum + " 之间"), { code: "VOICE_VALIDATION" });
     }
     return value;
   }
 
   function statusDescription(status) {
+    if (status && status.configured === false && status.runtime_mode === "lightweight") {
+      return "轻量模式 · 尚未配置 STT 接口或本地模型";
+    }
     const rawState = String(status && (status.model_state || status.state) || "").toLowerCase();
+    const resolved = String(status && (status.resolved_backend || status.backend) || "").toLowerCase();
+    if (resolved === "apple-speech") return "已就绪 · macOS 系统原生识别（免下载）";
+    if (resolved === "openai-api" && rawState !== "error" && rawState !== "failed") return "已就绪 · 轻量 STT 接口（免下载模型）";
     const stateLabels = {
       ready: "模型已就绪",
       loaded: "模型已就绪",
@@ -363,6 +391,8 @@ function __ocVoiceNativeSettingsV2(props) {
       cpu: "CPU",
       mps: "Apple GPU / Metal",
       metal: "Apple GPU / Metal",
+      "apple-speech": "macOS 原生",
+      "openai-api": "轻量接口",
     };
     const device = deviceLabels[rawDevice] || (rawDevice ? String(status.device) : "");
     return device ? state + " · " + device : state;
@@ -432,6 +462,35 @@ function __ocVoiceNativeSettingsV2(props) {
     if (clearRewriteKey()) return "";
     const key = String(rewriteKey() || "");
     return key.trim() ? key : undefined;
+  }
+
+  function optionalSttKey() {
+    if (clearSttKey()) return "";
+    const key = String(sttKey() || "");
+    return key.trim() ? key : undefined;
+  }
+
+  async function testSttConnection() {
+    if (disposed || sttTestBusy() || savingDisabled()) return;
+    setErrorText("");
+    setSttTestText("正在测试识别接口…");
+    setSttTestBusy(true);
+    try {
+      const overrides = buildConfig();
+      if (!overrides.stt_base_url || !overrides.stt_model) {
+        throw Object.assign(new Error("请填写 STT 兼容接口地址和模型名称"), { code: "VOICE_VALIDATION" });
+      }
+      const client = api();
+      if (typeof client.testStt !== "function") {
+        throw Object.assign(new Error("当前客户端暂不支持测试 STT 连接，请先保存配置后直接测试录音"), { code: "VOICE_VALIDATION" });
+      }
+      const result = unwrap(await client.testStt(overrides, optionalSttKey()));
+      if (!disposed) setSttTestText(result && result.ok ? (result.message || "识别接口连接成功") : (result && result.message) || "识别接口测试未通过，请检查配置");
+    } catch (error) {
+      if (!disposed) setSttTestText(failureMessage(error));
+    } finally {
+      if (!disposed) setSttTestBusy(false);
+    }
   }
 
   async function testRewriteConnection() {
@@ -551,11 +610,16 @@ function __ocVoiceNativeSettingsV2(props) {
     setErrorText("");
     try {
       const value = buildConfig();
-      if (!value.model_path) throw Object.assign(new Error("请填写已下载模型的目录"), { code: "VOICE_VALIDATION" });
+      if ((value.backend === "faster-whisper" || value.backend === "mlx") && !value.model_path) {
+        throw Object.assign(new Error("使用本地 Whisper/MLX 后端时请填写已下载模型目录"), { code: "VOICE_VALIDATION" });
+      }
       if (value.initial_prompt.length > 2048) throw Object.assign(new Error("技术词与识别提示最多 2048 个字符"), { code: "VOICE_VALIDATION" });
       const pendingKey = String(rewriteKey() || "");
       if (clearRewriteKey()) value.rewrite_api_key = "";
       else if (pendingKey.trim()) value.rewrite_api_key = pendingKey;
+      const pendingSttKey = String(sttKey() || "");
+      if (clearSttKey()) value.stt_api_key = "";
+      else if (pendingSttKey.trim()) value.stt_api_key = pendingSttKey;
       const result = unwrap(await api().saveConfig(value));
       if (disposed) return;
       try {
@@ -566,6 +630,7 @@ function __ocVoiceNativeSettingsV2(props) {
       applyConfig(result);
       setRuntimeText("配置已保存，下次录音使用新设置");
       setRewriteTestText("");
+      setSttTestText("");
       void refreshStatus();
     } catch (error) {
       if (!disposed) setErrorText(failureMessage(error));
@@ -728,10 +793,70 @@ function __ocVoiceNativeSettingsV2(props) {
       onChange: (checked) => setField("warmup_on_record", checked),
     })),
   ]);
+  const sttPresets = [
+    { label: "Groq Whisper", url: "https://api.groq.com/openai/v1", model: "whisper-large-v3-turbo" },
+    { label: "SiliconFlow SenseVoice", url: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/SenseVoiceSmall" },
+    { label: "OpenAI Whisper", url: "https://api.openai.com/v1", model: "whisper-1" },
+    { label: "本机 Whisper 服务", url: "http://127.0.0.1:8000/v1", model: "Systran/faster-whisper-small" },
+  ];
+  const sttPresetRow = createRow("快速预设", "一键填入常见免下载语音识别服务地址与模型（随后填写密钥并保存）", createButtonGroup(
+    sttPresets.map((preset) => actionButton("oc-voice-stt-preset-" + preset.label.toLowerCase().replace(/[^a-z0-9]+/g, "-"), preset.label, () => {
+      setField("stt_base_url", preset.url);
+      setField("stt_model", preset.model);
+    }, "ghost"))
+  ));
+  const sttKeyControl = createRow("STT API 密钥", "密钥只加密写入本机后台，不会回显；留空表示不更改。", ui.createComponent(ui.TextInputV2, {
+    id: "oc-voice-stt-api-key",
+    type: "password",
+    maxLength: 2048,
+    autocomplete: "new-password",
+    "aria-label": "STT API 密钥",
+    placeholder: "输入 STT 密钥（若使用免鉴权本机服务可留空）",
+    get disabled() { return savingDisabled(); },
+    get value() { return sttKey(); },
+    onInput: (event) => { setSttKey(event.currentTarget.value); setClearSttKey(false); },
+  }));
+  const sttKeyStatus = statusTextNode("oc-voice-stt-key-status", () => Boolean(currentValue("stt_key_configured")) ? "已保存 STT 密钥（不会回显）" : "尚未保存 STT 密钥");
+  const clearSttKeyButton = actionButton("oc-voice-stt-clear-key", () => clearSttKey() ? "撤销清除 STT 密钥" : "清除已保存 STT 密钥", () => {
+    if (clearSttKey()) {
+      setClearSttKey(false);
+    } else {
+      setSttKey("");
+      setClearSttKey(true);
+    }
+  }, "ghost");
+  const sttTestStatus = statusTextNode("oc-voice-stt-test-status", sttTestText);
+  const sttApiFields = ui.createComponent(ui.Show, {
+    get when() { const b = currentValue("backend"); return b === "auto" || b === "openai-api"; },
+    get children() {
+      return [
+        sttPresetRow,
+        inputControl("oc-voice-stt-base-url", "STT 接口地址", "OpenAI 兼容语音转写接口（/v1/audio/transcriptions）", "stt_base_url", { type: "url", maxlength: 2048, placeholder: "https://api.groq.com/openai/v1" }),
+        inputControl("oc-voice-stt-model", "STT 模型名称", "例如 whisper-large-v3-turbo 或 FunAudioLLM/SenseVoiceSmall", "stt_model", { maxlength: 200, placeholder: "whisper-large-v3-turbo" }),
+        inputControl("oc-voice-stt-timeout", "STT 请求超时", "秒，范围 5 到 120", "stt_timeout", { type: "number", min: 5, max: 120, step: 1 }),
+        sttKeyControl,
+        createRow("STT 密钥状态", "", sttKeyStatus),
+        createRow("STT 密钥操作", "清除操作会在保存时生效。", createButtonGroup([clearSttKeyButton])),
+        createRow("STT 连接测试", "发送极短静音片段验证地址、模型与密钥是否可用。", createButtonGroup([
+          actionButton("oc-voice-stt-test", "测试识别接口", () => { void testSttConnection(); }, "neutral", () => sttTestBusy()),
+        ])),
+        createRow("STT 测试结果", "", sttTestStatus),
+      ];
+    },
+  });
+  const localModelFields = ui.createComponent(ui.Show, {
+    get when() { const b = currentValue("backend"); return b === "auto" || b === "faster-whisper" || b === "mlx"; },
+    get children() {
+      return [
+        deviceControl,
+        inputControl("oc-voice-model-path", "本地模型目录（可选）", "仅在使用本地高精度 Whisper/MLX 模型时填写；免下载方案无需填写", "model_path", { type: "text", placeholder: "未安装本地模型时留空即可", maxlength: 1024 }),
+      ];
+    },
+  });
   const recognition = createSection("识别", [
     backendControl,
-    deviceControl,
-    inputControl("oc-voice-model-path", "已下载模型目录", "填写本机已下载的 Whisper 模型目录", "model_path", { type: "text", placeholder: "模型目录路径", maxlength: 1024 }),
+    sttApiFields,
+    localModelFields,
   ]);
   const advanced = ui.createComponent(ui.SettingsListV2, {
     get children() {

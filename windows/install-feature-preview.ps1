@@ -9,9 +9,9 @@ try {
   if (-not $MaintenanceRoot) { $MaintenanceRoot = Join-Path $env:USERPROFILE ".config\opencode\voice-maintenance" }
   $NativeMaintenanceRoot = Join-Path $env:USERPROFILE ".config\opencode\voice-maintenance"
   if (-not [IO.Path]::GetFullPath($MaintenanceRoot).Equals([IO.Path]::GetFullPath($NativeMaintenanceRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'The native updater uses the per-user voice-maintenance directory; a custom maintenance root is unsupported.' }
-  $ExpectedBackupRoot = Join-Path $MaintenanceRoot 'backups\0.2.0'
+  $ExpectedBackupRoot = Join-Path $MaintenanceRoot 'backups\0.2.1'
   if (-not $BackupRoot) { $BackupRoot = $ExpectedBackupRoot }
-  if (-not [IO.Path]::GetFullPath($BackupRoot).Equals([IO.Path]::GetFullPath($ExpectedBackupRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'BackupRoot must be voice-maintenance/backups/0.2.0 for native update recovery.' }
+  if (-not [IO.Path]::GetFullPath($BackupRoot).Equals([IO.Path]::GetFullPath($ExpectedBackupRoot), [StringComparison]::OrdinalIgnoreCase)) { throw 'BackupRoot must be voice-maintenance/backups/0.2.1 for native update recovery.' }
   $Archive = [IO.Path]::GetFullPath((Join-Path $AppPath "resources\app.asar"))
   if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) {
     $AlternateArchives = @((Join-Path $AppPath "app.asar"), (Join-Path $AppPath "Contents\Resources\app.asar")) |

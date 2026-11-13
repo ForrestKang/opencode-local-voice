@@ -250,7 +250,7 @@ def stop_verified_service(server: Any, port: int, token: str | None) -> dict[str
     proof = payload.get("proof")
     if (payload.get("service") != server.SERVICE_NAME or
             payload.get("protocol") != server.PROTOCOL or
-            payload.get("version") not in {server.VERSION, "0.2.1", "0.2.2", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.3.4", "0.3.5"} or
+            payload.get("version") not in {server.VERSION, "0.2.0", "0.2.1", "0.2.2", "0.3.0", "0.3.1", "0.3.2", "0.3.3", "0.3.4", "0.3.5"} or
             not isinstance(proof, str) or not hmac.compare_digest(proof, expected)):
         raise RuntimeError(
             f"local port {port} did not prove this installation's service identity; "
@@ -295,17 +295,30 @@ def stop_service(args: argparse.Namespace) -> dict[str, Any]:
 def configure(args: argparse.Namespace) -> dict[str, Any]:
     server = load_voice_server()
     home = _config_home(args.voice_home)
-    model = validate_model(Path(args.model_path), args.backend)
+    raw_model_path = str(getattr(args, "model_path", "") or "").strip()
+    if args.backend in ("faster-whisper", "mlx") or raw_model_path:
+        model = validate_model(Path(raw_model_path), args.backend)
+        persisted_model_path = model["path"]
+    else:
+        model = {"path": "", "validated": False, "backend": args.backend}
+        persisted_model_path = ""
     config, token = _preflight_store(server, home)
     service = stop_verified_service(server, config["port"], token)
     # ConfigStore can initialize token/config files, so construct it only after
     # the configured port is known to be free or the verified daemon is stopped.
     store = server.ConfigStore(home)
-    updated, changed = store.update({
+    patch: dict[str, Any] = {
         "backend": args.backend,
         "device": args.device,
-        "model_path": model["path"],
-    })
+        "model_path": persisted_model_path,
+    }
+    stt_url = getattr(args, "stt_base_url", None)
+    stt_model = getattr(args, "stt_model", None)
+    if isinstance(stt_url, str) and stt_url.strip():
+        patch["stt_base_url"] = stt_url.strip()
+    if isinstance(stt_model, str) and stt_model.strip():
+        patch["stt_model"] = stt_model.strip()
+    updated, changed = store.update(patch)
     return {"home": str(store.home), "changed": sorted(changed), "config": updated,
             "model": model, "service": service}
 
@@ -407,9 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.set_defaults(handler=download)
 
     setup = subparsers.add_parser("configure", help="persist backend/device/model_path in config.json")
-    setup.add_argument("--backend", choices=("auto", "faster-whisper", "mlx"), required=True)
+    setup.add_argument("--backend", choices=("auto", "apple-speech", "openai-api", "faster-whisper", "mlx"), required=True)
     setup.add_argument("--device", choices=("auto", "cuda", "cpu"), required=True)
-    setup.add_argument("--model-path", required=True)
+    setup.add_argument("--model-path", default="")
+    setup.add_argument("--stt-base-url", default="")
+    setup.add_argument("--stt-model", default="")
     setup.add_argument("--voice-home")
     setup.set_defaults(handler=configure)
 

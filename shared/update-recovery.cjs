@@ -13,7 +13,7 @@ const feature = require("./feature-update.cjs");
 const maintenancePackage = require("./maintenance-package.cjs");
 
 const SCHEMA = 1;
-const FEATURE_VERSION = "0.2.0";
+const FEATURE_VERSION = "0.2.1";
 const UPDATE_TIMEOUT_MS = 10 * 60 * 1000;
 const STABLE_MS = 3000;
 const POLL_MS = 250;
@@ -183,7 +183,7 @@ function validateActiveConfig(configPath, raw, hooks = {}) {
   statDirectory(config.backupRoot, fsa, "backupRoot"); statDirectory(config.maintenanceRoot, fsa, "maintenanceRoot");
   const expectedBackupRoot = path.join(config.maintenanceRoot, "backups", FEATURE_VERSION);
   if (!pathEqual(canonicalPath(config.backupRoot, fsa), canonicalPath(expectedBackupRoot, fsa), platform)) {
-    throw recoveryError("CONFIG_INVALID", "backupRoot must be maintenance/backups/0.2.0");
+    throw recoveryError("CONFIG_INVALID", "backupRoot must be maintenance/backups/0.2.1");
   }
   if (!pathInside(config.maintenanceRoot, config.shortcutReceipt, platform) || path.basename(config.shortcutReceipt).toLowerCase() !== "shortcut-receipt.json") {
     throw recoveryError("CONFIG_INVALID", "shortcutReceipt must be maintenance/shortcut-receipt.json");

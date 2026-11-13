@@ -48,7 +48,7 @@ function Require-FeatureTarget($Manifest, $Active, [string]$Archive) {
   )) { if (-not (Same $pair[0] $pair[1])) { Fail 'feature backup target paths do not match active.json' } }
 }
 function Require-MaintenanceMatch($Manifest, $Active, [string]$Transaction) {
-  if ($Manifest.schema -ne 1 -or [string]$Manifest.featureVersion -ne '0.2.0') { Fail 'maintenance transaction schema is unsupported' }
+  if ($Manifest.schema -ne 1 -or [string]$Manifest.featureVersion -ne '0.2.1') { Fail 'maintenance transaction schema is unsupported' }
   if (@('applied', 'restore-failed') -notcontains [string]$Manifest.state) { Fail 'maintenance transaction is not active or retryable' }
   if (-not (Same ([string]$Manifest.transaction) $Transaction) -or
       -not (Same ([string]$Manifest.appPath) ([string]$Active.app)) -or
@@ -73,7 +73,7 @@ try {
   if (-not (Same ([string]$Check.targetAsar) $Archive)) { throw 'active.json target archive is not the supported resources\app.asar.' }
 
   $Matched = @()
-  foreach ($Directory in @(Get-ChildItem -LiteralPath $Active.backupRoot -Directory -Filter 'v0.2.0-*')) {
+  foreach ($Directory in @(Get-ChildItem -LiteralPath $Active.backupRoot -Directory -Filter 'v0.2.1-*')) {
     if ($Directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
     $ManifestPath = Join-Path $Directory.FullName 'feature-manifest.json'
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { continue }

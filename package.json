@@ -1,6 +1,6 @@
 {
   "name": "opencode-local-voice",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Local speech-to-text with native OpenCode settings and Desktop, Web, TUI and CLI adapters",
   "engines": {

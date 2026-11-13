@@ -90,7 +90,7 @@ function Test-Hook([string]$Asar) {
   if ($text.IndexOf("oc-voice-update.cjs", [StringComparison]::Ordinal) -lt 0 -and
       $text.IndexOf("oc-voice-update:install", [StringComparison]::Ordinal) -lt 0 -and
       $text.IndexOf("oc-voice-update:call", [StringComparison]::Ordinal) -lt 0) {
-    Fail "target app.asar does not contain the 0.2.0 update bridge hook"
+    Fail "target app.asar does not contain the 0.2.1 update bridge hook"
   }
 }
 function Invoke-PackageCache([string]$Source, [string]$Destination, [string]$Node) {
@@ -128,7 +128,7 @@ function Test-ExistingDeployment([string]$ActivePath, [string]$LauncherPath, [st
   try {
     if (-not (Test-Path -LiteralPath $ActivePath -PathType Leaf) -or -not (Test-Path -LiteralPath $LauncherPath -PathType Leaf) -or -not (Test-Path -LiteralPath $ReceiptPath -PathType Leaf)) { return $false }
     $active = Read-Json $ActivePath "active.json"
-    if ($active.schema -ne 1 -or [string]$active.featureVersion -ne "0.2.0") { return $false }
+    if ($active.schema -ne 1 -or [string]$active.featureVersion -ne "0.2.1") { return $false }
     if (-not (Same ([string]$active.packageRoot) $StablePackageRoot) -or [string]$active.packageManifestSha256 -ne [string]$Package.manifestSha256) { return $false }
     foreach ($pair in @(
       @([string]$active.app, $ExpectedApp), @([string]$active.home, $ExpectedHome), @([string]$active.runtime, $ExpectedRuntime),
@@ -139,7 +139,7 @@ function Test-ExistingDeployment([string]$ActivePath, [string]$LauncherPath, [st
     $transaction = Full ([string]$active.transactionPath); $manifestPath = Join-Path $transaction "maintenance-transaction.json"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
     $manifest = Read-Json $manifestPath "maintenance transaction"
-    if ($manifest.schema -ne 1 -or [string]$manifest.featureVersion -ne "0.2.0" -or [string]$manifest.state -ne "applied" -or [string]$manifest.packageManifestSha256 -ne [string]$Package.manifestSha256) { return $false }
+    if ($manifest.schema -ne 1 -or [string]$manifest.featureVersion -ne "0.2.1" -or [string]$manifest.state -ne "applied" -or [string]$manifest.packageManifestSha256 -ne [string]$Package.manifestSha256) { return $false }
     $deployed = @($manifest.deployed); if ($deployed.Count -eq 0) { return $false }
     foreach ($item in $deployed) {
       $path = Full ([string]$item.path)
@@ -159,7 +159,7 @@ $BackupRoot = Full $BackupRoot; $MaintenanceRoot = Full $MaintenanceRoot; $NodeP
 if (-not $FixtureRoot) {
   $nativeMaintenance = Join-Path $env:USERPROFILE '.config\opencode\voice-maintenance'
   if (-not (Same $MaintenanceRoot $nativeMaintenance)) { Fail 'native updater requires the per-user voice-maintenance directory' }
-  if (-not (Same $BackupRoot (Join-Path $MaintenanceRoot 'backups\0.2.0'))) { Fail 'native recovery requires voice-maintenance/backups/0.2.0' }
+  if (-not (Same $BackupRoot (Join-Path $MaintenanceRoot 'backups\0.2.1'))) { Fail 'native recovery requires voice-maintenance/backups/0.2.1' }
 }
 if ($CandidateAsar -and -not $DryRun) { Fail "CandidateAsar is allowed only with -DryRun" }
 if ($CandidateAsar) { $CandidateAsar = Full $CandidateAsar; Require-File $CandidateAsar "CandidateAsar" }
@@ -181,19 +181,19 @@ $HookAsar = if ($CandidateAsar) { $CandidateAsar } else { $AsarPath }
 $hookInspector = Join-Path $PackageRoot "shared\maintenance-inspect.cjs"
 Require-File $hookInspector "maintenance-inspect.cjs"
 $hookLines = @(& $NodePath $hookInspector --asar $HookAsar --source $PackageRoot 2>&1 | ForEach-Object { [string]$_ })
-if ($LASTEXITCODE -ne 0) { Fail "target app.asar does not contain a verified 0.2.0 update bridge hook: $($hookLines -join ' ')" }
+if ($LASTEXITCODE -ne 0) { Fail "target app.asar does not contain a verified 0.2.1 update bridge hook: $($hookLines -join ' ')" }
 $running = @(Get-Process -Name OpenCode -ErrorAction SilentlyContinue)
 if (-not $FixtureRoot -and -not $DryRun -and $running.Count -gt 0) { Fail "OpenCode is still running; close it before activating maintenance" }
 
 if ($DryRun) {
   $package = Invoke-PackageVerify $PackageRoot $NodePath
-  if ([string]$package.featureVersion -and [string]$package.featureVersion -ne "0.2.0") { Fail "maintenance package featureVersion is unsupported" }
+  if ([string]$package.featureVersion -and [string]$package.featureVersion -ne "0.2.1") { Fail "maintenance package featureVersion is unsupported" }
   [ordered]@{ state = "dry-run"; app = $AppPath; candidateAsar = $HookAsar; hook = $hookLines[-1]; package = $package; writes = @() } | ConvertTo-Json -Depth 16
   exit 0
 }
 
 $package = Invoke-PackageCache $PackageRoot $MaintenanceRoot $NodePath
-if ([string]$package.featureVersion -ne "0.2.0") { Fail "stable package featureVersion is unsupported" }
+if ([string]$package.featureVersion -ne "0.2.1") { Fail "stable package featureVersion is unsupported" }
 $stablePackageRoot = Full ([string]$package.packageRoot)
 Require-Dir $stablePackageRoot "stable package cache"
 $launcherSource = Join-Path $stablePackageRoot "shared\update-launcher.pyw"
@@ -205,7 +205,7 @@ if (Test-ExistingDeployment $activePath $launcherPath $receiptPath $stablePackag
   [ordered]@{ state = "applied"; reused = $true; transaction = (Read-Json $activePath "active.json").transactionPath; active = $activePath; shortcutReceipt = $receiptPath; packageRoot = $stablePackageRoot; packageManifestSha256 = [string]$package.manifestSha256 } | ConvertTo-Json -Depth 12
   exit 0
 }
-$transaction = Join-Path $MaintenanceRoot ("transactions\0.2.0-" + [guid]::NewGuid().ToString("N"))
+$transaction = Join-Path $MaintenanceRoot ("transactions\0.2.1-" + [guid]::NewGuid().ToString("N"))
 $beforeRoot = Join-Path $transaction "before"
 New-Item -ItemType Directory -Path $beforeRoot -Force | Out-Null
 $targets = @(
@@ -223,7 +223,7 @@ $targets = @(
   (Backup-File (Join-Path $MaintenanceRoot "README.txt") "README.txt" $beforeRoot)
 )
 $transactionReceipt = [ordered]@{
-  schema = 1; featureVersion = "0.2.0"; state = "prepared"; createdAt = [DateTime]::UtcNow.ToString("o")
+  schema = 1; featureVersion = "0.2.1"; state = "prepared"; createdAt = [DateTime]::UtcNow.ToString("o")
   transaction = $transaction; activePath = $activePath; launcherPath = $launcherPath; receiptPath = $receiptPath
   packageRoot = $stablePackageRoot; packageManifestSha256 = [string]$package.manifestSha256; appPath = $AppPath
   before = @($targets); deployed = @()
@@ -233,7 +233,7 @@ Write-JsonAtomic $receiptFile $transactionReceipt
 
 try {
   $active = [ordered]@{
-    schema = 1; featureVersion = "0.2.0"; packageRoot = $stablePackageRoot; packageManifestSha256 = [string]$package.manifestSha256
+    schema = 1; featureVersion = "0.2.1"; packageRoot = $stablePackageRoot; packageManifestSha256 = [string]$package.manifestSha256
     node = $NodePath; python = $PythonPath; pythonw = $PythonwPath; app = $AppPath; home = $VoiceHome; runtime = $RuntimePath
     backupRoot = $BackupRoot; maintenanceRoot = $MaintenanceRoot; shortcutReceipt = $receiptPath; launcherPath = $launcherPath; transactionPath = $transaction
   }

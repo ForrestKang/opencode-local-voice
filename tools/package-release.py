@@ -14,7 +14,7 @@ BASE_FILES = ("README.md", "LICENSE", "VERSION", "CHANGELOG.md", "SECURITY.md", 
 PUBLIC_DOCS = ("README_en.md", "install.md", "configuration.md", "update-survival.md",
                "recovery-v0.2.0.md", "release-v0.2.0.md")
 COMMON_DIRS = ("shared", "extras", "tools", "tests", ".github")
-SUFFIXES = {".py", ".pyw", ".js", ".cjs", ".ts", ".json", ".md", ".txt", ".sh", ".ps1", ".cmd", ".yml", ".png"}
+SUFFIXES = {".py", ".pyw", ".js", ".cjs", ".ts", ".swift", ".json", ".md", ".txt", ".sh", ".ps1", ".cmd", ".yml", ".png"}
 PLATFORMS = ("source", "windows", "macos", "linux")
 
 

@@ -1,6 +1,7 @@
 param(
   [ValidateSet("auto", "large-v3-turbo", "medium", "small")]
   [string]$Model = "auto",
+  [switch]$WithLocalModel,
   [switch]$Cpu,
   [switch]$SkipDeps,
   [switch]$SkipModel,
@@ -46,7 +47,9 @@ if ($NeedsDesktop) {
   $AppAsar = Find-AppAsar $AppPath
 }
 
-if ($Model -eq "auto") {
+$UseLocalModel = $WithLocalModel.IsPresent -or $PSBoundParameters.ContainsKey("Model") -or $SkipModel.IsPresent
+
+if ($UseLocalModel -and $Model -eq "auto") {
   $cores = 4
   try { $cores = [int](Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property NumberOfLogicalProcessors -Maximum).Maximum } catch { }
   if ($cores -ge 8) { $Model = "medium" } else { $Model = "small" }
@@ -86,61 +89,84 @@ Info "checking and stopping only an authenticated idle local voice service befor
 & $PreflightPython $Helper stop-service --voice-home $VoiceHome
 Check-Native "local voice service preflight"
 
-if (-not $SkipDeps) {
-  if (-not (Test-Path -LiteralPath $VenvPy -PathType Leaf)) {
-    Info "creating isolated Python environment: $Venv"
-    & python -m venv $Venv
-    Check-Native "virtual environment creation"
-  }
-  Info "installing pinned runtime requirements ..."
-  & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $Requirements
-  if ($LASTEXITCODE -ne 0) {
-    Info "package mirror failed; retrying with official PyPI ..."
-    & $VenvPy -m pip install -q --disable-pip-version-check -r $Requirements
-    Check-Native "runtime dependency installation"
-  }
-}
-
-$HasNvidia = $false
-if (-not $Cpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
-  & nvidia-smi -L *> $null
-  $HasNvidia = ($LASTEXITCODE -eq 0)
-}
-if ($HasNvidia) {
-  if (-not (Test-Path -LiteralPath $CudaRequirements -PathType Leaf)) { Fail "Pinned CUDA runtime requirements are missing: $CudaRequirements" }
-  if ($SkipDeps) {
-    & $VenvPy -m pip show nvidia-cublas-cu12 nvidia-cudnn-cu12 *> $null
-    Check-Native "existing CUDA runtime verification"
-  } else {
-    Info "installing pinned CUDA 12 / cuDNN 9 runtime wheels ..."
-    & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $CudaRequirements
-    if ($LASTEXITCODE -ne 0) {
-      Info "package mirror failed; retrying CUDA runtime wheels from official PyPI ..."
-      & $VenvPy -m pip install -q --disable-pip-version-check -r $CudaRequirements
-      Check-Native "CUDA runtime installation"
+if (-not $UseLocalModel) {
+  Info "lightweight zero-download mode enabled (skipping pip packages, CUDA runtime, and local model download; pass -WithLocalModel to install faster-whisper locally)."
+  if (-not $SkipDeps) {
+    if (-not (Test-Path -LiteralPath $VenvPy -PathType Leaf)) {
+      Info "creating minimal Python stdlib environment: $Venv"
+      & python -m venv --without-pip $Venv
+      Check-Native "minimal virtual environment creation"
     }
   }
-} elseif (-not $Cpu) {
-  Info "NVIDIA runtime not detected; automatic backend selection can fall back to CPU. Use -Cpu to persist explicit CPU mode."
+  $RuntimePython = $VenvPy
+  Info "persisting lightweight backend configuration in local-voice/config.json ..."
+  & $RuntimePython $Helper configure --backend auto --device auto --voice-home $VoiceHome
+  Check-Native "lightweight voice configuration"
+} else {
+  if (-not $SkipDeps) {
+    if (-not (Test-Path -LiteralPath $VenvPy -PathType Leaf)) {
+      Info "creating isolated Python environment: $Venv"
+      & python -m venv $Venv
+      Check-Native "virtual environment creation"
+    } else {
+      & $VenvPy -m pip --version *> $null
+      if ($LASTEXITCODE -ne 0) {
+        Info "bootstrapping pip in existing Python environment ..."
+        & $VenvPy -m ensurepip --upgrade
+        Check-Native "pip bootstrap"
+      }
+    }
+    Info "installing pinned runtime requirements ..."
+    & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $Requirements
+    if ($LASTEXITCODE -ne 0) {
+      Info "package mirror failed; retrying with official PyPI ..."
+      & $VenvPy -m pip install -q --disable-pip-version-check -r $Requirements
+      Check-Native "runtime dependency installation"
+    }
+  }
+
+  $HasNvidia = $false
+  if (-not $Cpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+    & nvidia-smi -L *> $null
+    $HasNvidia = ($LASTEXITCODE -eq 0)
+  }
+  if ($HasNvidia) {
+    if (-not (Test-Path -LiteralPath $CudaRequirements -PathType Leaf)) { Fail "Pinned CUDA runtime requirements are missing: $CudaRequirements" }
+    if ($SkipDeps) {
+      & $VenvPy -m pip show nvidia-cublas-cu12 nvidia-cudnn-cu12 *> $null
+      Check-Native "existing CUDA runtime verification"
+    } else {
+      Info "installing pinned CUDA 12 / cuDNN 9 runtime wheels ..."
+      & $VenvPy -m pip install -q --disable-pip-version-check -i $Pypi -r $CudaRequirements
+      if ($LASTEXITCODE -ne 0) {
+        Info "package mirror failed; retrying CUDA runtime wheels from official PyPI ..."
+        & $VenvPy -m pip install -q --disable-pip-version-check -r $CudaRequirements
+        Check-Native "CUDA runtime installation"
+      }
+    }
+  } elseif (-not $Cpu) {
+    Info "NVIDIA runtime not detected; automatic backend selection can fall back to CPU. Use -Cpu to persist explicit CPU mode."
+  }
+
+  $Validated = $false
+  if (Test-Path -LiteralPath $ModelPath -PathType Container) {
+    & $VenvPy $Helper validate-model --backend faster-whisper --model-path $ModelPath
+    $Validated = ($LASTEXITCODE -eq 0)
+  }
+  if (-not $Validated) {
+    if ($SkipModel) { Fail "-SkipModel was set, but the model is missing or incomplete: $ModelPath" }
+    Info "downloading local model $Repo ..."
+    & $VenvPy $Helper download-model --backend faster-whisper --repo $Repo --model-path $ModelPath
+    Check-Native "model download and validation"
+  }
+
+  $RuntimePython = $VenvPy
+  Info "persisting backend, device, and model path in local-voice/config.json ..."
+  & $RuntimePython $Helper configure --backend faster-whisper --device $Device --model-path $ModelPath --voice-home $VoiceHome
+  Check-Native "local voice configuration"
 }
 
-$Validated = $false
-if (Test-Path -LiteralPath $ModelPath -PathType Container) {
-  & $VenvPy $Helper validate-model --backend faster-whisper --model-path $ModelPath
-  $Validated = ($LASTEXITCODE -eq 0)
-}
-if (-not $Validated) {
-  if ($SkipModel) { Fail "-SkipModel was set, but the model is missing or incomplete: $ModelPath" }
-  Info "downloading local model $Repo ..."
-  & $VenvPy $Helper download-model --backend faster-whisper --repo $Repo --model-path $ModelPath
-  Check-Native "model download and validation"
-}
-
-Info "persisting backend, device, and model path in local-voice/config.json ..."
-& $VenvPy $Helper configure --backend faster-whisper --device $Device --model-path $ModelPath --voice-home $VoiceHome
-Check-Native "local voice configuration"
-
-& $VenvPy $Helper deploy --destination $WhisperDir
+& $RuntimePython $Helper deploy --destination $WhisperDir
 Check-Native "voice server, CLI, and desktop bridge deployment"
 if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "stt_server.py") -PathType Leaf)) { Fail "voice service deployment failed verification." }
 if (-not (Test-Path -LiteralPath (Join-Path $WhisperDir "voice_server.py") -PathType Leaf)) { Fail "canonical voice server deployment failed verification." }
@@ -155,6 +181,6 @@ if ($NoApply) {
 
 Info "applying the patch from its verified candidate ..."
 $FeatureInstaller = Join-Path $PlatformDir "install-feature-preview.ps1"
-& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $FeatureInstaller -AppPath $AppPath -VoiceHome $VoiceHome -RuntimePath $WhisperDir -PythonPath $VenvPy
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $FeatureInstaller -AppPath $AppPath -VoiceHome $VoiceHome -RuntimePath $WhisperDir -PythonPath $RuntimePython
 Check-Native "desktop patch application"
 Info "installation complete. Start OpenCode through its maintained shortcut to use voice input."

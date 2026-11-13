@@ -260,7 +260,7 @@ function Update-TransactionReceipt($Active, [string]$ReceiptFile) {
 
 $ConfigPath = Full $ConfigPath
 $active = Read-Json $ConfigPath "active.json"
-if ($active.schema -ne 1 -or $active.featureVersion -ne "0.2.0") { Fail "active.json schema or featureVersion is unsupported" }
+if ($active.schema -ne 1 -or $active.featureVersion -ne "0.2.1") { Fail "active.json schema or featureVersion is unsupported" }
 Validate-Fixture $FixtureRoot $ConfigPath $active
 $app = Full ([string]$active.app)
 $maintenance = Full ([string]$active.maintenanceRoot)

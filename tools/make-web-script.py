@@ -33,7 +33,7 @@ def generate(origin, destination, store):
     connection = json.dumps({"url": address, "token": store.token}, ensure_ascii=True)
     transport = (ROOT / "shared" / "browser-transport.js").read_text(encoding="utf-8")
     renderer = (ROOT / "shared" / "oc-mic.js").read_text(encoding="utf-8")
-    header = "// ==UserScript==\n// @name OpenCode Local Voice (private pairing)\n// @version 0.2.0\n// @match " + origin + "/*\n// @grant none\n// @run-at document-idle\n// ==/UserScript==\n"
+    header = "// ==UserScript==\n// @name OpenCode Local Voice (private pairing)\n// @version 0.2.1\n// @match " + origin + "/*\n// @grant none\n// @run-at document-idle\n// ==/UserScript==\n"
     script = header + "// PRIVATE: contains a local credential. Do not publish or share.\n;(function(){\nif(location.origin!==" + json.dumps(origin) + ")return;\n" + transport + "\nwindow.ocVoiceTransport=window.createOcVoiceTransport(" + connection + ");\n" + renderer + "\n})();\n"
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8", opener=lambda path, flags: os.open(path, flags, 0o600)) as handle:

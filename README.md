@@ -5,51 +5,55 @@
 [![CI](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml/badge.svg)](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[English](docs/README_en.md) · [安装指南](docs/install.md) · [设置指南](docs/configuration.md) · [V0.2.0 更新说明](docs/release-v0.2.0.md)
+[English](docs/README_en.md) · [安装指南](docs/install.md) · [设置指南](docs/configuration.md) · [更新记录 (V0.2.1)](CHANGELOG.md) · [V0.2.0 更新说明](docs/release-v0.2.0.md)
 
-OpenCode Local Voice 为 OpenCode 提供本地语音输入。点击输入框旁的麦克风，说完后结束录音，识别结果就会写入当前草稿。你可以修改文字，再自行发送。
+OpenCode Local Voice 为 OpenCode 提供语音输入。点击输入框旁的麦克风，说完后结束录音，识别结果就会写入当前草稿。你可以修改文字，再自行发送。
 
-桌面端的“语音输入”直接放在 OpenCode 原生设置中，沿用宿主的控件与主题。语音识别在本机运行，也可通过同一服务接入 Web、TUI 和 CLI。
+桌面端的“语音输入”直接放在 OpenCode 原生设置中，沿用宿主的控件与主题。本地只运行轻量化纯标准库协调服务，同一服务也可接入 Web、TUI 和 CLI。
 
 ## 功能
 
-- **本地识别**：使用 Whisper，支持 faster-whisper 与 Apple Silicon 上的 MLX 后端。
-- **原生设置**：集中管理麦克风、识别语言、模型和文本处理选项。
+- **零下载轻量化默认**：默认安装不下载 Whisper 模型，也不安装 `pip` / PyTorch / Whisper 等重型依赖（仅创建极简标准库虚拟环境）。
+- **按平台适配语音识别**：
+  - **macOS**：默认使用系统原生 **Apple Speech**（`SFSpeechRecognizer`，支持端侧识别）。
+  - **Windows / Linux / 跨平台**：支持 **OpenAI 兼容语音识别接口**（Groq Whisper、SiliconFlow SenseVoice、OpenAI Whisper 或本机局域网 Whisper 服务）。
+  - **可选高精度本地模型**：需要完全离线或最高精度本地识别时，可随时按需安装 `faster-whisper` / Apple Silicon MLX。
+- **原生设置**：集中管理识别模式、API 预设、麦克风、识别语言和文本处理选项。
 - **词表与纠错**：内置编程词表，支持自定义术语、纠错规则和 JSON 导入导出。
 - **文本整理**：可选中文或英文标点、空格处理、编程任务模板与自定义模板。
-- **可选 AI 改写**：接入 OpenAI 兼容接口；默认使用本地整理，无需云端模型。
+- **可选 AI 改写**：接入 OpenAI 兼容接口；默认使用本地整理，无需额外改写模型。
 - **更新与恢复**：Windows 提供受支持安装包的更新后恢复，以及带备份的应用补丁恢复。
 
 ## 快速开始
 
-准备 Python 3.10+、Node.js 20+ 和 OpenCode。首次安装需要联网下载依赖与模型；CLI/TUI 的麦克风录音还需要 FFmpeg。
+准备 Python 3.10+、Node.js 20+ 和 OpenCode。默认轻量化安装无需联网下载任何 Python 依赖包或 Whisper 模型；CLI/TUI 的麦克风录音仍需要 FFmpeg。
 
 ```bash
 git clone https://github.com/ForrestKang/opencode-local-voice.git
 cd opencode-local-voice
 ```
 
-保存工作并完全退出 OpenCode，然后按平台安装：
+保存工作并完全退出 OpenCode，然后按平台进行轻量化安装：
 
-**Windows**
+**Windows（默认零下载，安装后在设置中配置 Groq / 硅基流动 / 本机 API）**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\windows\install.ps1
 ```
 
-**macOS（桌面适配为实验性）**
+**macOS（默认启用系统 Apple Speech，桌面适配为实验性）**
 
 ```bash
 bash macos/install.sh --app /Applications/OpenCode.app
 ```
 
-**Linux（安装本地服务）**
+**Linux（默认零下载安装轻量本地服务）**
 
 ```bash
 bash linux/install.sh
 ```
 
-Linux 桌面补丁需要指定可写的 Electron 解包目录。只使用 Web/TUI/CLI 时，Windows 可加 `-NoApply`，macOS 可加 `--no-apply`。自定义安装目录、模型选择和各端接入方法见 [安装指南](docs/install.md)。
+如果需要完整离线高精度本地 Whisper 模型（`faster-whisper` / CUDA / MLX），可在安装时显式加上 `-WithLocalModel`（Windows）或 `--with-local-model`（macOS/Linux）。Linux 桌面补丁需要指定可写的 Electron 解包目录。只使用 Web/TUI/CLI 时，Windows 可加 `-NoApply`，macOS 可加 `--no-apply`。更多参数和配置见 [安装指南](docs/install.md)。
 
 ## 使用
 

@@ -87,7 +87,7 @@ $Transaction = Full $Transaction
 if (-not (Test-Path -LiteralPath $Transaction -PathType Container)) { Fail "transaction directory is missing" }
 $manifestPath = Join-Path $Transaction "maintenance-transaction.json"
 $manifest = Read-Json $manifestPath "maintenance transaction"
-if ($manifest.schema -ne 1 -or $manifest.featureVersion -ne "0.2.0") { Fail "maintenance transaction schema is unsupported" }
+if ($manifest.schema -ne 1 -or $manifest.featureVersion -ne "0.2.1") { Fail "maintenance transaction schema is unsupported" }
 if (@("applied", "restore-failed") -notcontains [string]$manifest.state) { Fail "maintenance transaction is not an applied or retryable restore transaction" }
 if ($FixtureRoot) {
   $FixtureRoot = Full $FixtureRoot

@@ -35,7 +35,7 @@ function fixture(t, options = {}) {
   const runtime = path.join(root, "runtime");
   const home = path.join(root, "home");
   const maintenanceRoot = path.join(root, "maintenance");
-  const backupRoot = path.join(maintenanceRoot, "backups", "0.2.0");
+  const backupRoot = path.join(maintenanceRoot, "backups", "0.2.1");
   for (const directory of [app, path.join(app, "resources"), runtime, home, maintenanceRoot, backupRoot]) fs.mkdirSync(directory, { recursive: true });
   const release = makePackage(root);
   const targetAsar = path.join(app, "resources", "app.asar");
@@ -43,7 +43,7 @@ function fixture(t, options = {}) {
   const executable = path.join(app, "OpenCode.exe"); fs.writeFileSync(executable, "fixture executable");
   const configPath = path.join(maintenanceRoot, "active.json");
   const config = {
-    schema: 1, featureVersion: "0.2.0", ...release, node: process.execPath, python: process.execPath,
+    schema: 1, featureVersion: "0.2.1", ...release, node: process.execPath, python: process.execPath,
     pythonw: process.execPath, app, home, runtime, backupRoot, maintenanceRoot,
     shortcutReceipt: path.join(maintenanceRoot, "shortcut-receipt.json"), executable,
   };

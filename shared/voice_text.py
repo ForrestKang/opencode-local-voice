@@ -8,10 +8,15 @@ and a safe warning instead.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+import wave
 from typing import Any, Callable
 
 
@@ -39,8 +44,15 @@ DEFAULT_TEXT_CONFIG: dict[str, Any] = {
     "rewrite_timeout": 15,
 }
 
+DEFAULT_STT_CONFIG: dict[str, Any] = {
+    "stt_base_url": "",
+    "stt_model": "",
+    "stt_timeout": 30,
+}
+
 TEXT_CONFIG_FIELDS = frozenset(DEFAULT_TEXT_CONFIG)
-CONFIG_PATCH_CREDENTIAL_FIELDS = frozenset({"rewrite_api_key"})
+STT_CONFIG_FIELDS = frozenset(DEFAULT_STT_CONFIG)
+CONFIG_PATCH_CREDENTIAL_FIELDS = frozenset({"rewrite_api_key", "stt_api_key"})
 
 # Intentionally a recognition hint rather than a correction table. These terms
 # bias Whisper without forcing broad substitutions into the user's transcript.
@@ -160,40 +172,57 @@ def validate_text_config(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def validate_rewrite_api_key(value: Any) -> str:
-    value = _bounded_text(value, "rewrite_api_key", MAX_REWRITE_KEY_CHARS)
+def validate_api_key_value(value: Any, field: str = "rewrite_api_key") -> str:
+    value = _bounded_text(value, field, MAX_REWRITE_KEY_CHARS)
     if any(ord(char) < 0x20 or ord(char) > 0x7E for char in value):
-        raise TextConfigError("rewrite_api_key contains unsupported characters")
+        raise TextConfigError(f"{field} contains unsupported characters")
     return value.strip()
 
 
-def normalize_rewrite_url(value: str) -> str:
-    """Return an OpenAI-compatible chat-completions URL after strict checks."""
+def validate_rewrite_api_key(value: Any) -> str:
+    return validate_api_key_value(value, "rewrite_api_key")
+
+
+def validate_stt_api_key(value: Any) -> str:
+    return validate_api_key_value(value, "stt_api_key")
+
+
+def _normalize_openai_url(value: str, suffix: str, field: str) -> str:
+    """Validate an OpenAI-compatible HTTP(S) endpoint and normalize its path."""
     if not isinstance(value, str) or not value or len(value) > 2048 or any(ord(c) < 0x21 or ord(c) == 0x7F for c in value):
-        raise TextConfigError("rewrite_base_url must be a valid HTTP(S) endpoint")
+        raise TextConfigError(f"{field} must be a valid HTTP(S) endpoint")
     try:
         parsed = urllib.parse.urlsplit(value)
         hostname = parsed.hostname
         _ = parsed.port
     except ValueError as exc:
-        raise TextConfigError("rewrite_base_url must be a valid HTTP(S) endpoint") from exc
+        raise TextConfigError(f"{field} must be a valid HTTP(S) endpoint") from exc
     if not hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise TextConfigError("rewrite_base_url cannot contain credentials, query, or fragment")
+        raise TextConfigError(f"{field} cannot contain credentials, query, or fragment")
     scheme = parsed.scheme.casefold()
     loopback_hosts = {"localhost", "127.0.0.1", "::1"}
     if scheme != "https" and not (scheme == "http" and hostname.casefold() in loopback_hosts):
-        raise TextConfigError("rewrite_base_url must use HTTPS or local loopback HTTP")
+        raise TextConfigError(f"{field} must use HTTPS or local loopback HTTP")
     path = parsed.path.rstrip("/")
-    if path.casefold().endswith("/v1/chat/completions"):
-        endpoint_path = path
-    elif path.casefold().endswith("/chat/completions"):
+    v1_suffix = "/v1" + suffix
+    if path.casefold().endswith(v1_suffix) or path.casefold().endswith(suffix):
         endpoint_path = path
     elif path.casefold().endswith("/v1"):
-        endpoint_path = path + "/chat/completions"
+        endpoint_path = path + suffix
     else:
-        endpoint_path = path + "/v1/chat/completions"
+        endpoint_path = path + v1_suffix
     netloc = parsed.netloc
     return urllib.parse.urlunsplit((scheme, netloc, endpoint_path, "", ""))
+
+
+def normalize_rewrite_url(value: str) -> str:
+    """Return an OpenAI-compatible chat-completions URL after strict checks."""
+    return _normalize_openai_url(value, "/chat/completions", "rewrite_base_url")
+
+
+def normalize_stt_url(value: str) -> str:
+    """Return an OpenAI-compatible audio-transcriptions URL after strict checks."""
+    return _normalize_openai_url(value, "/audio/transcriptions", "stt_base_url")
 
 
 def build_asr_hints(config: dict[str, Any], maximum: int = 1900) -> tuple[str, str]:
@@ -509,3 +538,149 @@ def process_transcript(raw_text: str, config: dict[str, Any], *, recognized_lang
         return local, local, None
     final, warning = rewrite_text(local, config, api_key=api_key, opener=opener)
     return local, final, warning
+
+
+def validate_stt_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize OpenAI-compatible STT settings."""
+    merged = {key: raw.get(key, DEFAULT_STT_CONFIG[key]) for key in DEFAULT_STT_CONFIG}
+    stt_url = _bounded_text(merged["stt_base_url"], "stt_base_url", 2048).strip()
+    if stt_url:
+        stt_url = normalize_stt_url(stt_url)
+    stt_model = _bounded_text(merged["stt_model"], "stt_model", 200).strip()
+    timeout = merged["stt_timeout"]
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 5 <= timeout <= 120:
+        raise TextConfigError("stt_timeout must be an integer between 5 and 120")
+    return {
+        "stt_base_url": stt_url,
+        "stt_model": stt_model,
+        "stt_timeout": timeout,
+    }
+
+
+def _redact_secret(message: str, api_key: str) -> str:
+    cleaned = message
+    if api_key and api_key in cleaned:
+        cleaned = cleaned.replace(api_key, "[REDACTED]")
+    return cleaned
+
+
+def _build_multipart_wav(wav_bytes: bytes, *, model: str, language: str = "auto",
+                         prompt: str = "") -> tuple[bytes, str]:
+    boundary = "ocvoice-" + uuid.uuid4().hex
+    parts: list[bytes] = []
+
+    def add_field(name: str, value: str) -> None:
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n".encode("utf-8")
+        )
+
+    add_field("model", model)
+    add_field("response_format", "json")
+    if language in ("zh", "en"):
+        add_field("language", language)
+    cleaned_prompt = prompt.strip()[:500]
+    if cleaned_prompt:
+        add_field("prompt", cleaned_prompt)
+    parts.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+        f"Content-Type: audio/wav\r\n\r\n".encode("utf-8")
+        + wav_bytes
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def transcribe_openai_compatible(wav_bytes: bytes, config: dict[str, Any], *,
+                                 api_key: str = "", language: str = "auto",
+                                 prompt: str = "", opener: Callable | Any | None = None) -> str:
+    """Send 16kHz WAV audio to an OpenAI-compatible /v1/audio/transcriptions API."""
+    url = str(config.get("stt_base_url", "")).strip()
+    model = str(config.get("stt_model", "")).strip()
+    if not url or not model:
+        raise TextConfigError("请先在设置中配置语音识别接口地址和模型 ID")
+    endpoint = normalize_stt_url(url)
+    timeout = config.get("stt_timeout", 30)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 5 <= timeout <= 120:
+        timeout = 30
+    body, content_type = _build_multipart_wav(wav_bytes, model=model, language=language, prompt=prompt)
+    headers = {"Content-Type": content_type, "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    if opener is None:
+        opener = urllib.request.build_opener(_NoRedirectHandler()).open
+    try:
+        with opener(request, timeout=timeout) as response:
+            raw = response.read(MAX_REWRITE_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            err_body = exc.read(2048).decode("utf-8", errors="replace")
+            parsed_err = json.loads(err_body)
+            if isinstance(parsed_err, dict):
+                err_obj = parsed_err.get("error")
+                if isinstance(err_obj, dict) and isinstance(err_obj.get("message"), str):
+                    detail = err_obj["message"]
+                elif isinstance(err_obj, str):
+                    detail = err_obj
+                elif isinstance(parsed_err.get("message"), str):
+                    detail = parsed_err["message"]
+        except Exception:
+            detail = ""
+        safe_detail = _redact_secret(detail.strip(), api_key)[:160]
+        if exc.code in (401, 403):
+            raise RuntimeError("语音识别接口鉴权失败，请检查 STT API Key") from exc
+        if safe_detail:
+            raise RuntimeError(f"语音识别接口返回 HTTP {exc.code}: {safe_detail}") from exc
+        raise RuntimeError(f"语音识别接口返回错误 HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise RuntimeError("语音识别接口请求失败，请检查网络、地址和防火墙设置") from exc
+    if len(raw) > MAX_REWRITE_RESPONSE_BYTES:
+        raise RuntimeError("语音识别接口响应过大")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("语音识别接口返回了无效 JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+        raise RuntimeError("语音识别接口响应缺少 text 字段")
+    text = payload["text"].strip()
+    if len(text) > MAX_REWRITE_TEXT_CHARS:
+        raise RuntimeError("语音识别返回文本过长")
+    return text
+
+
+def _silent_wav16k(duration_ms: int = 300) -> bytes:
+    frames = max(1, int(16000 * duration_ms / 1000))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x00" * frames)
+    return buf.getvalue()
+
+
+def test_stt_connection(config: dict[str, Any], *, api_key: str = "",
+                        opener: Callable | Any | None = None) -> dict[str, Any]:
+    """Verify STT endpoint reachability, authentication, and model configuration."""
+    started = time.monotonic()
+    url = str(config.get("stt_base_url", "")).strip()
+    model = str(config.get("stt_model", "")).strip()
+    if not url or not model:
+        return {"ok": False, "message": "请先填写语音识别接口地址和模型 ID。"}
+    try:
+        transcribe_openai_compatible(
+            _silent_wav16k(),
+            config,
+            api_key=api_key,
+            language=config.get("language", "auto"),
+            opener=opener,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return {"ok": True, "message": f"语音识别接口连接成功（{latency_ms} ms）。"}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)[:200]}

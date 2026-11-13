@@ -249,6 +249,7 @@ function createClient(options = {}) {
   return { ensure, transcribe, cancel, getConfig: () => call("GET", "/v1/config"), saveConfig: patch => call("PATCH", "/v1/config", patch),
     previewText: (text, config, key) => textCall("/v1/text", { text, config: config || {}, ...(key !== undefined ? { rewrite_api_key: key } : {}) }),
     testRewrite: (config, key) => textCall("/v1/rewrite/test", { config: config || {}, ...(key !== undefined ? { rewrite_api_key: key } : {}) }),
+    testStt: (config, key) => textCall("/v1/stt/test", { config: config || {}, ...(key !== undefined ? { stt_api_key: key } : {}) }),
     useLocal: id => { if (!validId(id)) throw voiceError("INVALID_JOB", "任务标识无效"); return call("POST", "/v1/jobs/" + id + "/use-local", {}); },
     status: () => call("GET", "/v1/status"), warmup: () => call("POST", "/v1/warmup", {}), voiceHome,
     close: () => { for (const id of activeJobs) cancel(id).catch(() => {}); } };
@@ -274,6 +275,7 @@ function install(electron, options = {}) {
     return client.previewText(text, config, key);
   });
   handler("oc-voice:test-rewrite", (_, config, key) => client.testRewrite(config, key));
+  handler("oc-voice:test-stt", (_, config, key) => client.testStt(config, key));
   handler("oc-voice:transcribe", async (event, bytes, mime, id) => {
     if (!validId(id) || owners.has(id)) throw voiceError("INVALID_JOB", "转写任务标识无效或重复");
     const owner = event.sender.id; owners.set(id, owner);

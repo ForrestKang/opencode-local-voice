@@ -303,6 +303,44 @@ with tempfile.TemporaryDirectory(prefix="oc-voice-refusal-fixture-") as director
   assert.equal(result.error, undefined, result.error && result.error.message);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), {
-    foreign_no_token: true, busy_config_unchanged: true
+    foreign_no_token: true, busy_config_unchanged: true,
   });
+});
+
+test("configure allows lightweight auto and apple-speech backends without a local model path", () => {
+  const python = process.platform === "win32" ? "python" : "python3";
+  const helper = path.resolve(__dirname, "../shared/install-support.py");
+  const code = String.raw`
+import argparse, importlib.util, json, pathlib, socket, sys, tempfile
+spec = importlib.util.spec_from_file_location("lite_configure_fixture", pathlib.Path(sys.argv[1]))
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+voice = installer.load_voice_server()
+with tempfile.TemporaryDirectory(prefix="oc-voice-lite-cfg-") as directory:
+    home = pathlib.Path(directory) / "voice-home"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    old = __import__("os").environ.get("OPENCODE_STT_LOCAL_PORT")
+    __import__("os").environ["OPENCODE_STT_LOCAL_PORT"] = str(port)
+    try:
+        res_auto = installer.configure(argparse.Namespace(
+            voice_home=str(home), backend="auto", device="auto", model_path="",
+            stt_base_url="https://api.groq.com/openai/v1", stt_model="whisper-large-v3-turbo"))
+        assert res_auto["config"]["backend"] == "auto"
+        assert res_auto["config"]["model_path"] == ""
+        assert res_auto["config"]["stt_base_url"] == "https://api.groq.com/openai/v1/audio/transcriptions"
+        res_apple = installer.configure(argparse.Namespace(
+            voice_home=str(home), backend="apple-speech", device="auto", model_path=""))
+        assert res_apple["config"]["backend"] == "apple-speech"
+        assert res_apple["config"]["model_path"] == ""
+    finally:
+        if old is None: __import__("os").environ.pop("OPENCODE_STT_LOCAL_PORT", None)
+        else: __import__("os").environ["OPENCODE_STT_LOCAL_PORT"] = old
+print(json.dumps({"ok": True}))
+`;
+  const result = spawnSync(python, ["-c", code, helper], { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+  assert.equal(result.error, undefined, result.error && result.error.message);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)), { ok: true });
 });

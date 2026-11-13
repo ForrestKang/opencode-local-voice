@@ -602,6 +602,7 @@ function preloadSource(input) {
       'useLocal:(jobId)=>electron.ipcRenderer.invoke("oc-voice:use-local",jobId),' +
       'previewText:(text,config,key)=>electron.ipcRenderer.invoke("oc-voice:preview-text",text,config,key),' +
       'testRewrite:(config,key)=>electron.ipcRenderer.invoke("oc-voice:test-rewrite",config,key),' +
+      'testStt:(config,key)=>electron.ipcRenderer.invoke("oc-voice:test-stt",config,key),' +
       'onProgress:(callback)=>{if(typeof callback!=="function")return ()=>{};const listener=(_event,payload)=>callback(payload);electron.ipcRenderer.on("oc-voice:progress",listener);return ()=>electron.ipcRenderer.removeListener("oc-voice:progress",listener)}' +
       '})}catch(error){console.error("[oc-voice] preload bridge failed",error)}})()',
     PRELOAD_END,

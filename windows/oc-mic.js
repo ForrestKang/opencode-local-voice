@@ -1,4 +1,4 @@
-/* oc-mic-v0.2.0; shared Desktop/Web client; oc-mic-v3 compatible patch entry */
+/* oc-mic-v0.2.1; shared Desktop/Web client; oc-mic-v3 compatible patch entry */
 ;(function () {
   "use strict"
   if (window.__ocMicInstalled) return
@@ -90,7 +90,7 @@
     try { microphoneId = localStorage.getItem("oc-voice-microphone") || "" } catch (_) {}
   })
   function makeUi() {
-    var root = document.createElement("div"); root.id = "oc-mic-controls"; root.setAttribute("data-oc-mic-version", "0.2.0")
+    var root = document.createElement("div"); root.id = "oc-mic-controls"; root.setAttribute("data-oc-mic-version", "0.2.1")
     var status = document.createElement("span"); status.className = "oc-mic-status"; status.setAttribute("aria-hidden", "true")
     var live = document.createElement("span"); live.className = "oc-mic-a11y"; live.setAttribute("role", "status"); live.setAttribute("aria-live", "polite")
     var cancel = actionButton("oc-mic-cancel", "取消录音", "×"); cancel.className = "oc-mic-cancel"
@@ -155,7 +155,7 @@
     var stale = document.getElementById("oc-mic-btn")
     if (stale && stale !== ui.btn) stale.remove()
     if (ui.root.parentElement !== found.toolbar || ui.root.nextElementSibling !== found.anchor) {
-      found.toolbar.insertBefore(ui.root, found.anchor); log("v0.2.0 mounted on prompt toolbar")
+      found.toolbar.insertBefore(ui.root, found.anchor); log("v0.2.1 mounted on prompt toolbar")
     }
     currentForm = found.form
     ui.root.classList.toggle("oc-mic-compact", found.form.clientWidth < 500)
@@ -345,7 +345,7 @@
     try {
       var res = await transcribe(savedAudio, run)
       if (run !== token) return
-      if (res && res.error) throw new Error(res.error)
+      if (res && res.error) throw Object.assign(new Error(res.error), res.code ? { code: res.code } : {})
       var text = res && typeof res.text === "string" ? res.text.trim() : ""
       if (!text) throw new Error("未识别到语音")
       var found = locate()
@@ -508,5 +508,5 @@
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true })
   setInterval(function () { schedule() }, 2500)
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { schedule() }); else schedule()
-  log("v0.2.0 script ready")
+  log("v0.2.1 script ready")
 })()

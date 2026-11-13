@@ -4,13 +4,13 @@ const cache = require("../shared/maintenance-package.cjs");
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "voice-cache-test-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = path.join(root, "download"), maintenance = path.join(root, "maintenance");
-  for (const name of cache.REQUIRED_FILES) { const file = path.join(source, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, name === "VERSION" ? "0.2.0\n" : "fixture:" + name); }
+  for (const name of cache.REQUIRED_FILES) { const file = path.join(source, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, name === "VERSION" ? "0.2.1\n" : "fixture:" + name); }
   return { root, source, maintenance };
 }
 test("source installation remains verifiable after its downloaded directory is removed", t => {
   const { source, maintenance } = fixture(t), saved = cache.ensurePackage(source, maintenance);
   fs.rmSync(source, { recursive: true, force: true });
-  assert.equal(cache.verifyPackage(saved.packageRoot, saved.manifestSha256).featureVersion, "0.2.0");
+  assert.equal(cache.verifyPackage(saved.packageRoot, saved.manifestSha256).featureVersion, "0.2.1");
   assert.equal(fs.readFileSync(path.join(saved.packageRoot, "shared/update-launcher.pyw"), "utf8"), "fixture:shared/update-launcher.pyw");
 });
 test("stable cache is reused and corrupt immutable caches are rejected", t => {
