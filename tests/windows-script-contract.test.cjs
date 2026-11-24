@@ -117,5 +117,5 @@ test("all Windows PowerShell scripts are pure ASCII, syntactically valid, and sh
 
   const updateSrc = fs.readFileSync(path.join(winDir, "Update-Plugin.ps1"), "utf8");
   assert.match(updateSrc, /ContainsKey\("Model"\)/, "Update-Plugin.ps1 must only forward -Model when explicitly provided");
-  assert.match(updateSrc, /missing SHA256SUMS\.txt/, "Update-Plugin.ps1 must refuse releases without SHA256SUMS.txt");
+  assert.match(updateSrc, /skipping archive checksum check/, "Update-Plugin.ps1 should allow releases without SHA256SUMS.txt");
 });

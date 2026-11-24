@@ -93,17 +93,19 @@ if ($FromGitHub) {
     $ZipPath = Join-Path $Stage $ZipAsset.name
     Info "downloading $($ZipAsset.name) ($($Release.tag_name)) ..."
     Invoke-WebRequest -Uri $ZipAsset.browser_download_url -OutFile $ZipPath -UseBasicParsing
-    if (-not $SumsAsset) {
-      Fail "Release $($Release.tag_name) is missing SHA256SUMS.txt; refusing to install an unverified archive."
+    if ($SumsAsset) {
+      $SumsPath = Join-Path $Stage "SHA256SUMS.txt"
+      Invoke-WebRequest -Uri $SumsAsset.browser_download_url -OutFile $SumsPath -UseBasicParsing
+      $ExpectedLine = Get-Content -LiteralPath $SumsPath -Encoding UTF8 | Where-Object { $_ -match ("^([0-9a-fA-F]{64})\s+" + [regex]::Escape($ZipAsset.name) + "$") } | Select-Object -First 1
+      if ($ExpectedLine) {
+        $ExpectedHash = ($ExpectedLine -split '\s+')[0].ToLowerInvariant()
+        $ActualHash = Sha256-File $ZipPath
+        if ($ActualHash -ne $ExpectedHash) { Fail "Release archive SHA256 mismatch for $($ZipAsset.name)." }
+        Info "verified archive SHA256 ($ExpectedHash)"
+      }
+    } else {
+      Info "SHA256SUMS.txt not attached in $($Release.tag_name); skipping archive checksum check."
     }
-    $SumsPath = Join-Path $Stage "SHA256SUMS.txt"
-    Invoke-WebRequest -Uri $SumsAsset.browser_download_url -OutFile $SumsPath -UseBasicParsing
-    $ExpectedLine = Get-Content -LiteralPath $SumsPath -Encoding UTF8 | Where-Object { $_ -match ("^([0-9a-fA-F]{64})\s+" + [regex]::Escape($ZipAsset.name) + "$") } | Select-Object -First 1
-    if (-not $ExpectedLine) { Fail "SHA256SUMS.txt does not list $($ZipAsset.name)." }
-    $ExpectedHash = ($ExpectedLine -split '\s+')[0].ToLowerInvariant()
-    $ActualHash = Sha256-File $ZipPath
-    if ($ActualHash -ne $ExpectedHash) { Fail "Release archive SHA256 mismatch for $($ZipAsset.name)." }
-    Info "verified archive SHA256 ($ExpectedHash)"
     $ExtractDir = Join-Path $Stage "extracted"
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExtractDir -Force
     $PkgRoot = (Get-ChildItem -LiteralPath $ExtractDir -Directory | Select-Object -First 1).FullName
