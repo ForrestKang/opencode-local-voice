@@ -25,6 +25,21 @@ function __ocVoiceNativeSettingsV2(props) {
   const [sttTestText, setSttTestText] = ui.createSignal("");
   const [vocabularyStatus, setVocabularyStatus] = ui.createSignal("");
   const [draftActionText, setDraftActionText] = ui.createSignal("");
+  const defaultModelCatalog = {
+    recommended_id: "faster-whisper-large-v3-turbo",
+    can_download: false,
+    models: [
+      { id: "faster-whisper-large-v3-turbo", label: "large-v3-turbo（独显推荐 · 识别最准）", size_hint: "约 1.6 GB", description: "中英文混说与技术术语最准，有 NVIDIA 显卡时速度极快", installed: false, active: false, path: "" },
+      { id: "faster-whisper-small", label: "small（极速轻量 · CPU / 核显推荐）", size_hint: "约 480 MB", description: "体积小下载快、占用内存低，无独立显卡也能流畅使用", installed: false, active: false, path: "" },
+      { id: "faster-whisper-medium", label: "medium（均衡之选 · 多语种准确）", size_hint: "约 1.5 GB", description: "准确率与占用折中，适合中英日韩等多语种场景", installed: false, active: false, path: "" },
+    ],
+    download: { state: "idle", id: "", message: "" },
+  };
+  const [modelCatalog, setModelCatalog] = ui.createSignal(defaultModelCatalog);
+  const [selectedModelId, setSelectedModelId] = ui.createSignal("faster-whisper-large-v3-turbo");
+  const [modelActionText, setModelActionText] = ui.createSignal("");
+  const [modelDownloadBusy, setModelDownloadBusy] = ui.createSignal(false);
+  let modelPollTimer = null;
   let disposed = false;
   let readRun = 0;
 
@@ -56,17 +71,18 @@ function __ocVoiceNativeSettingsV2(props) {
     rewrite_timeout: 15,
     rewrite_key_configured: false,
   };
+  const isApplePlatform = /Mac|iPhone|iPad|iPod/i.test((typeof navigator !== "undefined" && navigator.platform) || "");
   const languageOptions = [
     { value: "auto", label: "自动检测" },
     { value: "zh", label: "中文" },
     { value: "en", label: "English" },
   ];
   const backendOptions = [
-    { value: "auto", label: "自动（优先免下载方案）" },
-    { value: "apple-speech", label: "macOS 系统原生识别（零下载 · 纯本地）" },
-    { value: "openai-api", label: "兼容 STT 接口（免下载模型 · 极轻量）" },
-    { value: "faster-whisper", label: "本地 faster-whisper（可选 · 需下载模型）" },
-    { value: "mlx", label: "本地 MLX（Apple Silicon · 可选模型）" },
+    { value: "auto", label: "自动判断（填好哪个就用哪个）" },
+    ...(isApplePlatform ? [{ value: "apple-speech", label: "macOS 系统听写（系统自带 · 免配置）" }] : []),
+    { value: "openai-api", label: "在线语音接口（云端 API · 不用下载模型）" },
+    { value: "faster-whisper", label: "本机离线模型（faster-whisper / SenseVoice）" },
+    ...(isApplePlatform ? [{ value: "mlx", label: "Apple 芯片本机模型（MLX）" }] : []),
   ];
   const deviceOptions = [
     { value: "auto", label: "自动选择" },
@@ -74,22 +90,22 @@ function __ocVoiceNativeSettingsV2(props) {
     { value: "cpu", label: "CPU" },
   ];
   const textModeOptions = [
-    { value: "original", label: "原文" },
-    { value: "clean", label: "轻度整理" },
-    { value: "coding-prompt", label: "编程任务" },
-    { value: "analysis-prompt", label: "问题分析" },
-    { value: "custom", label: "自定义模板" },
+    { value: "original", label: "原文输出" },
+    { value: "clean", label: "轻度整理（自动顺标点）" },
+    { value: "coding-prompt", label: "整理成写代码指令" },
+    { value: "analysis-prompt", label: "整理成问题分析指令" },
+    { value: "custom", label: "套用自定义模板" },
     { value: "ai", label: "AI 改写" },
   ];
   const punctuationOptions = [
-    { value: "auto", label: "自动" },
-    { value: "zh", label: "中文标点" },
+    { value: "auto", label: "自动（按语种断句加标点）" },
+    { value: "zh", label: "中文标点（含长句自动断句）" },
     { value: "en", label: "英文标点" },
     { value: "none", label: "保持原标点" },
   ];
   const spaceOptions = [
     { value: "preserve", label: "保持空格" },
-    { value: "smart", label: "智能整理" },
+    { value: "smart", label: "智能整理（长停顿转逗号 · 保留英文词距）" },
     { value: "space-to-comma", label: "空格转逗号" },
     { value: "comma-to-space", label: "逗号转空格" },
   ];
@@ -325,9 +341,9 @@ function __ocVoiceNativeSettingsV2(props) {
     if (rewriteModel.length > 256) throw Object.assign(new Error("AI 模型名称最多 256 个字符"), { code: "VOICE_VALIDATION" });
     if (rewritePrompt.length > 4000) throw Object.assign(new Error("AI 改写提示最多 4000 个字符"), { code: "VOICE_VALIDATION" });
     if (textMode === "ai" && (!rewriteBaseUrl || !rewriteModel)) throw Object.assign(new Error("请填写 AI 兼容接口地址和模型名称"), { code: "VOICE_VALIDATION" });
-    if (sttBaseUrl.length > 2048) throw Object.assign(new Error("STT 接口地址最多 2048 个字符"), { code: "VOICE_VALIDATION" });
-    if (sttModel.length > 200) throw Object.assign(new Error("STT 模型名称最多 200 个字符"), { code: "VOICE_VALIDATION" });
-    if (backend === "openai-api" && (!sttBaseUrl || !sttModel)) throw Object.assign(new Error("请填写兼容 STT 接口地址和模型名称"), { code: "VOICE_VALIDATION" });
+    if (sttBaseUrl.length > 2048) throw Object.assign(new Error("在线识别接口地址最多 2048 个字符"), { code: "VOICE_VALIDATION" });
+    if (sttModel.length > 200) throw Object.assign(new Error("在线识别模型名称最多 200 个字符"), { code: "VOICE_VALIDATION" });
+    if (backend === "openai-api" && (!sttBaseUrl || !sttModel)) throw Object.assign(new Error("请填写在线语音接口地址和模型名称"), { code: "VOICE_VALIDATION" });
     return {
       backend,
       device: String(currentValue("device") || "auto"),
@@ -359,7 +375,7 @@ function __ocVoiceNativeSettingsV2(props) {
   function numberValue(name, minimum, maximum) {
     const value = Number(currentValue(name));
     if (!Number.isInteger(value) || value < minimum || value > maximum) {
-      const labels = { max_seconds: "最长录音", beam_size: "解码宽度", cpu_threads: "CPU 线程数", idle_seconds: "模型空闲释放", rewrite_timeout: "AI 请求超时", stt_timeout: "STT 请求超时" };
+      const labels = { max_seconds: "最长录音", beam_size: "解码宽度", cpu_threads: "CPU 线程数", idle_seconds: "模型空闲释放", rewrite_timeout: "AI 请求超时", stt_timeout: "在线接口超时" };
       throw Object.assign(new Error((labels[name] || name) + "必须在 " + minimum + " 到 " + maximum + " 之间"), { code: "VOICE_VALIDATION" });
     }
     return value;
@@ -367,12 +383,12 @@ function __ocVoiceNativeSettingsV2(props) {
 
   function statusDescription(status) {
     if (status && status.configured === false && status.runtime_mode === "lightweight") {
-      return "轻量模式 · 尚未配置 STT 接口或本地模型";
+      return "尚未设置识别方式：请在下方填写「在线语音接口」或「本机离线模型文件夹」后点击保存";
     }
     const rawState = String(status && (status.model_state || status.state) || "").toLowerCase();
     const resolved = String(status && (status.resolved_backend || status.backend) || "").toLowerCase();
-    if (resolved === "apple-speech") return "已就绪 · macOS 系统原生识别（免下载）";
-    if (resolved === "openai-api" && rawState !== "error" && rawState !== "failed") return "已就绪 · 轻量 STT 接口（免下载模型）";
+    if (resolved === "apple-speech") return "已就绪 · macOS 系统听写";
+    if (resolved === "openai-api" && rawState !== "error" && rawState !== "failed") return "已就绪 · 在线语音接口";
     const stateLabels = {
       ready: "模型已就绪",
       loaded: "模型已就绪",
@@ -383,7 +399,7 @@ function __ocVoiceNativeSettingsV2(props) {
       error: "模型加载失败",
       failed: "模型加载失败",
     };
-    const state = stateLabels[rawState] || (rawState ? "语音服务已连接" : "语音服务已连接");
+    const state = stateLabels[rawState] || "语音服务已连接";
     const rawDevice = String(status && status.device || "").toLowerCase();
     const deviceLabels = {
       cuda: "GPU / CUDA",
@@ -391,8 +407,8 @@ function __ocVoiceNativeSettingsV2(props) {
       cpu: "CPU",
       mps: "Apple GPU / Metal",
       metal: "Apple GPU / Metal",
-      "apple-speech": "macOS 原生",
-      "openai-api": "轻量接口",
+      "apple-speech": "系统听写",
+      "openai-api": "在线接口",
     };
     const device = deviceLabels[rawDevice] || (rawDevice ? String(status.device) : "");
     return device ? state + " · " + device : state;
@@ -411,6 +427,7 @@ function __ocVoiceNativeSettingsV2(props) {
       applyConfig(value);
       setHasConfig(true);
       setLoading(false);
+      void refreshModels();
       try {
         const client = api();
         if (typeof client.status === "function") {
@@ -458,6 +475,106 @@ function __ocVoiceNativeSettingsV2(props) {
     }
   }
 
+  function clearModelPoll() {
+    if (modelPollTimer !== null) {
+      window.clearTimeout(modelPollTimer);
+      modelPollTimer = null;
+    }
+  }
+
+  function applyModelCatalog(catalog) {
+    if (!catalog || typeof catalog !== "object" || !Array.isArray(catalog.models)) return;
+    setModelCatalog(catalog);
+    const active = catalog.models.find((item) => item.active);
+    const download = catalog.download && typeof catalog.download === "object" ? catalog.download : {};
+    if (download.state === "downloading") {
+      setModelDownloadBusy(true);
+      setModelActionText(download.message || "正在下载并校验模型，请稍候…");
+      if (download.id) setSelectedModelId(download.id);
+      scheduleModelPoll();
+    } else {
+      clearModelPoll();
+      const wasBusy = modelDownloadBusy();
+      setModelDownloadBusy(false);
+      if (download.state === "done" && wasBusy) {
+        setModelActionText(download.message || "模型已下载并自动启用");
+        void (async () => {
+          try {
+            const latest = unwrap(await api().getConfig());
+            if (!disposed && latest && latest.model_path !== undefined) {
+              setField("model_path", String(latest.model_path || ""));
+              if (typeof props.onConfig === "function") props.onConfig(config());
+            }
+          } catch (_) {}
+          void refreshStatus();
+        })();
+      } else if (download.state === "error" && wasBusy) {
+        setModelActionText(download.message || "模型下载失败，请重试");
+      }
+      if (active) setSelectedModelId(active.id);
+      else if (catalog.recommended_id && !catalog.models.some((item) => item.id === selectedModelId())) {
+        setSelectedModelId(catalog.recommended_id);
+      }
+    }
+  }
+
+  function scheduleModelPoll() {
+    clearModelPoll();
+    if (disposed) return;
+    modelPollTimer = window.setTimeout(() => {
+      modelPollTimer = null;
+      void refreshModels();
+    }, 1500);
+  }
+
+  async function refreshModels() {
+    if (disposed) return;
+    try {
+      const client = api();
+      if (typeof client.listModels !== "function") return;
+      const catalog = unwrap(await client.listModels());
+      if (!disposed) applyModelCatalog(catalog);
+    } catch (_) {
+      // Older desktop bridges or test doubles may omit model catalog RPCs.
+    }
+  }
+
+  async function downloadOrUseSelectedModel() {
+    if (disposed || modelDownloadBusy() || savingDisabled()) return;
+    const targetId = selectedModelId();
+    const models = (modelCatalog().models || []);
+    const spec = models.find((item) => item.id === targetId);
+    if (!spec) return;
+    setErrorText("");
+    const client = api();
+    if (typeof client.downloadModel !== "function") {
+      setModelActionText(isApplePlatform ? "请通过安装脚本 bash macos/install.sh --with-local-model 下载此推荐模型" : "请通过安装包或 Update-Plugin.cmd -WithLocalModel 下载此推荐模型");
+      return;
+    }
+    setModelDownloadBusy(true);
+    setModelActionText(spec.installed ? "正在切换并启用模型…" : "正在启动下载，请保持网络畅通…");
+    try {
+      const response = unwrap(await client.downloadModel(targetId, true));
+      if (disposed) return;
+      if (response && response.catalog) applyModelCatalog(response.catalog);
+      if (response && response.installed) {
+        const nextPath = (response.config && response.config.model_path) || response.path;
+        if (nextPath !== undefined) setField("model_path", String(nextPath || ""));
+        if (typeof props.onConfig === "function") props.onConfig(config());
+        setModelDownloadBusy(false);
+        setModelActionText("已切换并启用：" + spec.label);
+        void refreshStatus();
+      } else {
+        scheduleModelPoll();
+      }
+    } catch (error) {
+      if (!disposed) {
+        setModelDownloadBusy(false);
+        setModelActionText(failureMessage(error));
+      }
+    }
+  }
+
   function optionalRewriteKey() {
     if (clearRewriteKey()) return "";
     const key = String(rewriteKey() || "");
@@ -478,11 +595,11 @@ function __ocVoiceNativeSettingsV2(props) {
     try {
       const overrides = buildConfig();
       if (!overrides.stt_base_url || !overrides.stt_model) {
-        throw Object.assign(new Error("请填写 STT 兼容接口地址和模型名称"), { code: "VOICE_VALIDATION" });
+        throw Object.assign(new Error("请填写在线语音接口地址和模型名称"), { code: "VOICE_VALIDATION" });
       }
       const client = api();
       if (typeof client.testStt !== "function") {
-        throw Object.assign(new Error("当前客户端暂不支持测试 STT 连接，请先保存配置后直接测试录音"), { code: "VOICE_VALIDATION" });
+        throw Object.assign(new Error("当前客户端暂不支持测试在线连接，请先保存后直接试着录音"), { code: "VOICE_VALIDATION" });
       }
       const result = unwrap(await client.testStt(overrides, optionalSttKey()));
       if (!disposed) setSttTestText(result && result.ok ? (result.message || "识别接口连接成功") : (result && result.message) || "识别接口测试未通过，请检查配置");
@@ -504,12 +621,91 @@ function __ocVoiceNativeSettingsV2(props) {
         throw Object.assign(new Error("请填写 AI 兼容接口地址和模型名称"), { code: "VOICE_VALIDATION" });
       }
       const result = unwrap(await api().testRewrite(overrides, optionalRewriteKey()));
-      if (!disposed) setRewriteTestText(result && result.ok ? "连接测试成功" : "连接测试未通过，请检查接口配置");
+      if (!disposed) setRewriteTestText(result && result.ok ? (result.message || "连接测试成功") : (result && result.message) || "连接测试未通过，请检查接口配置");
     } catch (error) {
       if (!disposed) setRewriteTestText(failureMessage(error));
     } finally {
       if (!disposed) setRewriteTestBusy(false);
     }
+  }
+
+  function createRemoteModelPicker(spec) {
+    const [models, setModels] = ui.createSignal([]);
+    const [busy, setBusy] = ui.createSignal(false);
+    const [statusText, setStatusText] = ui.createSignal("");
+
+    function selectOptions() {
+      const list = models();
+      if (list.length > 0) return list.map((id) => ({ value: id, label: id }));
+      const cur = String(currentValue(spec.modelField) || "").trim();
+      return [{ value: "__placeholder__", label: cur ? cur + "（尚未拉取云端列表）" : "先填地址和密钥，再点「获取模型」" }];
+    }
+
+    function currentOption() {
+      const list = models();
+      if (list.length === 0) return selectOptions()[0];
+      const cur = String(currentValue(spec.modelField) || "").trim();
+      if (cur && list.includes(cur)) return { value: cur, label: cur };
+      return { value: list[0], label: list[0] };
+    }
+
+    async function fetchRemoteList() {
+      if (disposed || busy() || savingDisabled()) return;
+      setErrorText("");
+      const url = String(currentValue(spec.urlField) || "").trim();
+      if (!url) {
+        setStatusText("请先填写接口地址");
+        return;
+      }
+      const client = api();
+      const rpc = client && client[spec.rpcMethod];
+      if (typeof rpc !== "function") {
+        setStatusText("当前客户端不支持拉取云端模型，请直接填写下方模型名称");
+        return;
+      }
+      setBusy(true);
+      setStatusText("正在从服务端获取模型列表…");
+      try {
+        const timeoutRaw = Number(currentValue(spec.timeoutField));
+        const cfg = {
+          [spec.urlField]: url,
+          ...(Number.isFinite(timeoutRaw) && timeoutRaw >= 5 ? { [spec.timeoutField]: Math.trunc(timeoutRaw) } : {}),
+        };
+        const result = unwrap(await rpc(cfg, spec.getKey()));
+        if (disposed) return;
+        const list = Array.isArray(result && result.models) ? result.models.filter((item) => typeof item === "string" && item.trim()) : [];
+        if (list.length > 0) {
+          setModels(list);
+          const cur = String(currentValue(spec.modelField) || "").trim();
+          if (!cur || !list.includes(cur)) setField(spec.modelField, list[0]);
+          setStatusText((result && result.message) || ("已获取 " + list.length + " 个模型，可直接选择"));
+        } else {
+          setStatusText((result && result.message) || "未获取到模型，请直接手填下方模型名称");
+        }
+      } catch (error) {
+        if (!disposed) setStatusText(failureMessage(error));
+      } finally {
+        if (!disposed) setBusy(false);
+      }
+    }
+
+    const row = createRow("获取云端模型", "填好接口地址和 API 密钥后点「获取模型」，即可直接从下拉列表选择，无需手动输入。", createButtonGroup([
+      ui.createComponent(ui.SelectV2, {
+        appearance: "inline",
+        "data-testid": spec.selectTestId,
+        get disabled() { return savingDisabled() || busy() || models().length === 0; },
+        get options() { return selectOptions(); },
+        get current() { return currentOption(); },
+        value: (option) => option.value,
+        label: (option) => option.label,
+        onSelect: (option) => {
+          if (option && option.value && option.value !== "__placeholder__") setField(spec.modelField, option.value);
+        },
+      }),
+      actionButton(spec.buttonId, () => busy() ? "正在获取…" : "获取模型", () => { void fetchRemoteList(); }, "neutral", () => busy()),
+      statusTextNode(spec.statusTestId, statusText),
+    ]));
+    return row;
   }
 
   function importVocabularyFile(file) {
@@ -610,8 +806,8 @@ function __ocVoiceNativeSettingsV2(props) {
     setErrorText("");
     try {
       const value = buildConfig();
-      if ((value.backend === "faster-whisper" || value.backend === "mlx") && !value.model_path) {
-        throw Object.assign(new Error("使用本地 Whisper/MLX 后端时请填写已下载模型目录"), { code: "VOICE_VALIDATION" });
+      if ((value.backend === "faster-whisper" || value.backend === "mlx" || value.backend === "sherpa-onnx") && !value.model_path) {
+        throw Object.assign(new Error("使用本地 Whisper/MLX/Sherpa 后端时请填写已下载模型目录"), { code: "VOICE_VALIDATION" });
       }
       if (value.initial_prompt.length > 2048) throw Object.assign(new Error("技术词与识别提示最多 2048 个字符"), { code: "VOICE_VALIDATION" });
       const pendingKey = String(rewriteKey() || "");
@@ -670,7 +866,7 @@ function __ocVoiceNativeSettingsV2(props) {
     return options;
   }
 
-  const root = ui.template('<div id="oc-voice-settings" data-oc-voice-native="true"><div class="settings-v2-tab-header"><h2 class="settings-v2-tab-title">语音输入</h2><p id="oc-voice-runtime" class="text-12-regular text-v2-text-text-muted" role="status" aria-live="polite"></p></div><div class="settings-v2-tab-body"><div data-oc-voice-main-sections></div><details class="settings-v2-section" data-oc-voice-advanced><summary class="settings-v2-section-title">高级识别设置</summary><div data-oc-voice-advanced-list></div></details><div class="settings-v2-section" data-oc-voice-footer><p id="oc-voice-settings-error" class="text-12-regular text-v2-text-text-muted" role="alert"></p><div class="flex flex-wrap justify-end gap-2" data-oc-voice-actions></div></div></div></div>')();
+  const root = ui.template('<div id="oc-voice-settings" data-oc-voice-native="true"><div class="settings-v2-tab-header"><h2 class="settings-v2-tab-title">语音输入</h2><p id="oc-voice-runtime" class="text-12-regular text-v2-text-text-muted" role="status" aria-live="polite"></p></div><div class="settings-v2-tab-body"><div data-oc-voice-main-sections></div><details class="settings-v2-section" data-oc-voice-advanced><summary class="settings-v2-section-title">高级参数与识别微调</summary><div data-oc-voice-advanced-list></div></details><div class="settings-v2-section" data-oc-voice-footer><p id="oc-voice-settings-error" class="text-12-regular text-v2-text-text-muted" role="alert"></p><div class="flex flex-wrap justify-end gap-2" data-oc-voice-actions></div></div></div></div>')();
   const mainSections = root.querySelector("[data-oc-voice-main-sections]");
   const advancedList = root.querySelector("[data-oc-voice-advanced-list]");
   const errorNode = root.querySelector("#oc-voice-settings-error");
@@ -683,40 +879,39 @@ function __ocVoiceNativeSettingsV2(props) {
   const rewriteKeyStatus = statusTextNode("oc-voice-rewrite-key-status", () => Boolean(currentValue("rewrite_key_configured")) ? "已保存密钥（不会回显）" : "尚未保存密钥");
   const vocabularyStatusNode = statusTextNode("oc-voice-vocabulary-status", vocabularyStatus);
   const customTemplateRow = createRow("自定义模板", "模板必须且只能包含一次 {text}，它会被本次识别文字替换", textFieldControl(
-    "oc-voice-prompt-template", "自定义模板", "", "prompt_template", () => currentValue("prompt_template"), (value) => setField("prompt_template", value), { rows: 3, maxLength: 6000, placeholder: "填写本地模板，包含 {text}" }
+    "oc-voice-prompt-template", "自定义模板", "", "prompt_template", () => currentValue("prompt_template"), (value) => setField("prompt_template", value), { rows: 3, maxLength: 6000, placeholder: "填写模板，包含 {text}" }
   ));
   const customTemplateSection = ui.createComponent(ui.Show, {
     get when() { return currentValue("text_mode") === "custom"; },
     get children() { return customTemplateRow; },
   });
-  const textProcessing = createSection("文本处理", [
-    selectControl("oc-voice-text-mode", "处理模式", "选择原文、轻度整理、本地模板或可选 AI 改写", () => textModeOptions, () => currentValue("text_mode"), (value) => setField("text_mode", value)),
-    selectControl("oc-voice-punctuation-mode", "标点", "只处理本次语音结果", () => punctuationOptions, () => currentValue("punctuation_mode"), (value) => setField("punctuation_mode", value)),
-    selectControl("oc-voice-space-mode", "空格处理", "普通键盘空格不受影响；这里只整理语音结果", () => spaceOptions, () => currentValue("space_mode"), (value) => setField("space_mode", value)),
+  const textProcessing = createSection("文字整理（可选）", [
+    selectControl("oc-voice-text-mode", "输出风格", "决定识别出的语音如何整理后再填入输入框", () => textModeOptions, () => currentValue("text_mode"), (value) => setField("text_mode", value)),
+    selectControl("oc-voice-punctuation-mode", "标点与自动断句", "自动顺中英文标点；长句停顿会自动断句并补逗号、句号或问号", () => punctuationOptions, () => currentValue("punctuation_mode"), (value) => setField("punctuation_mode", value)),
+    selectControl("oc-voice-space-mode", "空格与停顿处理", "不影响键盘直接输入；「智能整理」会把中文长停顿转成逗号并保留英文词距", () => spaceOptions, () => currentValue("space_mode"), (value) => setField("space_mode", value)),
     customTemplateSection,
-    createRow("固定录音操作", "Enter 结束录音；Esc 取消。开始录音请点麦克风按钮，普通空格保持原行为。", ""),
   ]);
 
-  const vocabularySection = createSection("词表与模板", [
-    selectControl("oc-voice-vocabulary-preset", "内置词表", "编程词表仅作为识别提示，不会进行激进的近音替换", () => vocabularyPresetOptions, () => currentValue("vocabulary_preset"), (value) => setField("vocabulary_preset", value)),
-    createRow("词表文件", "只导入／导出词表、preset 与纠错规则；不包含 AI 地址或密钥。", createButtonGroup([
+  const vocabularySection = createSection("专有名词词表", [
+    selectControl("oc-voice-vocabulary-preset", "内置词表", "打开后可提升代码、命令与常见技术词的识别准确度", () => vocabularyPresetOptions, () => currentValue("vocabulary_preset"), (value) => setField("vocabulary_preset", value)),
+    createRow("导入或导出", "仅导入/导出词汇表和纠错对照，不包含网址或 API 密钥", createButtonGroup([
       actionButton("oc-voice-vocabulary-import", "导入 JSON", () => vocabularyFileInput && vocabularyFileInput.click(), "neutral"),
       actionButton("oc-voice-vocabulary-export", "导出 JSON", exportVocabularyFile, "ghost"),
     ])),
     createRow("词表状态", "", vocabularyStatusNode),
   ]);
-  const vocabularyDetails = createCollapsibleSection("自定义词汇与纠错", "vocabulary", [
-    textFieldControl("oc-voice-vocabulary-list", "自定义词汇", "每行一个术语或别名；最多 100 项，每项 80 个字符", "vocabulary", () => vocabularyText(), (value) => setVocabularyText(value), { rows: 5, maxLength: 32768, placeholder: "填写术语或别名，每行一个" }),
-    textFieldControl("oc-voice-replacements-list", "纠错对照", "每行一条，格式为 错误写法 => 正确写法", "replacements", () => replacementText(), (value) => setReplacementText(value), { rows: 5, maxLength: 32768, placeholder: "错误写法 => 正确写法" }),
+  const vocabularyDetails = createCollapsibleSection("自定义词汇与错字纠正", "vocabulary", [
+    textFieldControl("oc-voice-vocabulary-list", "自定义词汇", "每行一个术语或专有名词；最多 100 项，每项 80 个字符", "vocabulary", () => vocabularyText(), (value) => setVocabularyText(value), { rows: 5, maxLength: 32768, placeholder: "填写常说的词汇或英文名，每行一个" }),
+    textFieldControl("oc-voice-replacements-list", "错别字自动替换", "每行一条，格式为：错误写法 => 正确写法", "replacements", () => replacementText(), (value) => setReplacementText(value), { rows: 5, maxLength: 32768, placeholder: "错误写法 => 正确写法" }),
   ]);
 
-  const rewriteKeyControl = createRow("API 密钥", "密钥只写入本机后台，不会回读；留空表示不更改。", ui.createComponent(ui.TextInputV2, {
+  const rewriteKeyControl = createRow("API 密钥", "密钥只加密保存在本机，不会回显；留空代表保持原样。", ui.createComponent(ui.TextInputV2, {
     id: "oc-voice-rewrite-api-key",
     type: "password",
     maxLength: 2048,
     autocomplete: "new-password",
     "aria-label": "AI API 密钥",
-    placeholder: "输入新密钥（不回显已保存密钥）",
+    placeholder: "输入新密钥（已保存密钥不会明文显示）",
     get disabled() { return savingDisabled(); },
     get value() { return rewriteKey(); },
     onInput: (event) => { setRewriteKey(event.currentTarget.value); setClearRewriteKey(false); },
@@ -729,27 +924,38 @@ function __ocVoiceNativeSettingsV2(props) {
       setClearRewriteKey(true);
     }
   }, "ghost");
+  const rewriteModelPicker = createRemoteModelPicker({
+    urlField: "rewrite_base_url",
+    modelField: "rewrite_model",
+    timeoutField: "rewrite_timeout",
+    rpcMethod: "listRewriteModels",
+    getKey: optionalRewriteKey,
+    selectTestId: "oc-voice-rewrite-model-select",
+    buttonId: "oc-voice-rewrite-fetch-models",
+    statusTestId: "oc-voice-rewrite-models-status",
+  });
   const rewriteRows = [
-    createRow("启用说明", "选择并保存 AI 改写模式后，会发送本次转写文本和改写提示。预览与连接测试仅在点击各自按钮时请求；测试连接只发送固定测试句。", ""),
-    inputControl("oc-voice-rewrite-base-url", "兼容 API 地址", "支持 OpenAI 兼容接口", "rewrite_base_url", { type: "url", maxlength: 2048, placeholder: "https://example.com/v1" }),
-    inputControl("oc-voice-rewrite-model", "模型名称", "填写服务端提供的模型 ID", "rewrite_model", { maxlength: 256, placeholder: "模型名称" }),
-    textFieldControl("oc-voice-rewrite-prompt", "改写提示", "用于 AI 改写的指令", "rewrite_prompt", () => currentValue("rewrite_prompt"), (value) => setField("rewrite_prompt", value), { rows: 3, maxLength: 4000, placeholder: "填写改写要求" }),
-    inputControl("oc-voice-rewrite-timeout", "请求超时", "秒，范围 5 到 60", "rewrite_timeout", { type: "number", min: 5, max: 60, step: 1 }),
+    createRow("说明", "仅在你把上方「输出风格」选为「AI 改写」并保存后生效；测试连接只发送固定测试句。", ""),
+    inputControl("oc-voice-rewrite-base-url", "兼容接口地址", "OpenAI 格式接口地址（例如 https://api.openai.com/v1）", "rewrite_base_url", { type: "url", maxlength: 2048, placeholder: "https://example.com/v1" }),
     rewriteKeyControl,
     createRow("密钥状态", "", rewriteKeyStatus),
-    createRow("密钥操作", "清除操作会在保存时生效。", createButtonGroup([clearKeyButton])),
+    createRow("密钥操作", "点击清除并保存后会删除旧密钥。", createButtonGroup([clearKeyButton])),
+    rewriteModelPicker,
+    inputControl("oc-voice-rewrite-model", "模型名称", "选上方拉取结果会自动填入，也可直接手填或微调", "rewrite_model", { maxlength: 256, placeholder: "点上方「获取模型」自动填入，或手动填写" }),
+    textFieldControl("oc-voice-rewrite-prompt", "改写提示词", "告诉 AI 如何润色转写文字", "rewrite_prompt", () => currentValue("rewrite_prompt"), (value) => setField("rewrite_prompt", value), { rows: 3, maxLength: 4000, placeholder: "填写改写要求" }),
+    inputControl("oc-voice-rewrite-timeout", "请求超时", "秒，范围 5 到 60", "rewrite_timeout", { type: "number", min: 5, max: 60, step: 1 }),
     createRow("连接测试", "手动检查 AI 接口是否可用。", createButtonGroup([
       actionButton("oc-voice-rewrite-test", "测试连接", () => { void testRewriteConnection(); }, "neutral", () => rewriteTestBusy()),
     ])),
     createRow("连接状态", "", rewriteTestStatus),
   ];
-  const aiFallback = createRow("AI 改写未启用", "选择“AI 改写”后设置兼容接口；默认不会请求远端服务。", "");
+  const aiFallback = createRow("AI 改写未启用", "需要用大模型帮你润色句子时，把上方「输出风格」改成「AI 改写」即可配置；默认不联网请求 AI。", "");
   const aiFields = ui.createComponent(ui.Show, {
     get when() { return currentValue("text_mode") === "ai"; },
     fallback: aiFallback,
     get children() { return rewriteRows; },
   });
-  const aiSection = createSection("AI 改写", [aiFields]);
+  const aiSection = createSection("AI 润色改写", [aiFields]);
 
   const draftActions = [
     ["insertComma", "插入逗号"],
@@ -757,11 +963,11 @@ function __ocVoiceNativeSettingsV2(props) {
     ["spaceToComma", "空格转逗号"],
     ["commaToSpace", "逗号转空格"],
   ].map(([action, label]) => actionButton("oc-voice-draft-" + action, label, () => performDraftAction(action), "neutral"));
-  const textTools = createCollapsibleSection("文本工具", "text-tools", [
-    createRow("固定录音操作", "Enter 结束录音；Esc 取消。这里的转换按钮只处理明确选区或最近插入的语音片段。", ""),
-    createRow("插入与转换", "无明确选区且没有最近插入的语音片段时，操作会提示先选择文本。", createButtonGroup(draftActions)),
-    createRow("恢复语音文本", "只恢复最近语音片段，不替换其他草稿内容。", createButtonGroup([
-      actionButton("oc-voice-restore-original", "恢复原始", () => restoreDraft("original"), "ghost"),
+  const textTools = createCollapsibleSection("草稿文本小工具", "text-tools", [
+    createRow("操作说明", "Enter 结束录音；Esc 取消。下方按钮只针对选中文字或刚插入的语音片段生效。", ""),
+    createRow("快捷排版", "请先在输入框选中文字，再点击对应按钮。", createButtonGroup(draftActions)),
+    createRow("恢复上一次识别结果", "只恢复刚插入的语音片段，不动你手打的内容。", createButtonGroup([
+      actionButton("oc-voice-restore-original", "恢复原识别文本", () => restoreDraft("original"), "ghost"),
       actionButton("oc-voice-restore-local", "恢复本地结果", () => restoreDraft("local"), "ghost"),
     ])),
     createRow("操作状态", "", draftActionStatus),
@@ -777,14 +983,14 @@ function __ocVoiceNativeSettingsV2(props) {
     label: (option) => option.label,
     onSelect: (option) => { if (option) setMicrophone(option.value === systemDefaultMicrophone ? "" : option.value); },
   });
-  const languageControl = selectControl("oc-voice-language", "识别语言", "默认自动检测，也可固定为中文或英语", makeSelectOptions(languageOptions, "language"), () => currentValue("language"), (value) => setField("language", value));
-  const backendControl = selectControl("oc-voice-backend", "识别后端", "自动选择可用的本地识别后端", makeSelectOptions(backendOptions, "backend"), () => currentValue("backend"), (value) => setField("backend", value));
-  const deviceControl = selectControl("oc-voice-device", "计算设备", "自动模式会尝试使用可用的 GPU", makeSelectOptions(deviceOptions, "device"), () => currentValue("device"), (value) => setField("device", value));
-  const common = createSection("输入", [
-    createRow("麦克风", "选择用于语音输入的麦克风", microphoneControl),
+  const languageControl = selectControl("oc-voice-language", "说话语言", "默认自动判断中英文，也可固定为中文或英文", makeSelectOptions(languageOptions, "language"), () => currentValue("language"), (value) => setField("language", value));
+  const backendControl = selectControl("oc-voice-backend", "识别方式", "二选一即可：① 在线接口（不用下模型）；② 本机离线模型（填目录）", makeSelectOptions(backendOptions, "backend"), () => currentValue("backend"), (value) => setField("backend", value));
+  const deviceControl = selectControl("oc-voice-device", "计算设备", "仅本机模型生效：有 NVIDIA 显卡会自动用 CUDA 加速，不确定选自动即可", makeSelectOptions(deviceOptions, "device"), () => currentValue("device"), (value) => setField("device", value));
+  const common = createSection("基础设置", [
+    createRow("麦克风", "选择用来说话的麦克风设备", microphoneControl),
     languageControl,
-    inputControl("oc-voice-max-seconds", "最长录音", "秒，达到上限后自动停止并识别", "max_seconds", { type: "number", min: 5, max: 300, step: 1 }),
-    createRow("开始录音时预热", "提前加载模型，减少停止录音后的等待", ui.createComponent(ui.Switch, {
+    inputControl("oc-voice-max-seconds", "单次最长录音", "秒（到时间自动停止并开始转写）", "max_seconds", { type: "number", min: 5, max: 300, step: 1 }),
+    createRow("开始录音时预热", "仅本机离线模型生效：点录音按钮时提前加载模型，减少说完后的等待", ui.createComponent(ui.Switch, {
       children: "开始录音时预热",
       hideLabel: true,
       "aria-label": "开始录音时预热",
@@ -792,32 +998,49 @@ function __ocVoiceNativeSettingsV2(props) {
       get checked() { return Boolean(currentValue("warmup_on_record")); },
       onChange: (checked) => setField("warmup_on_record", checked),
     })),
+    createRow("快捷操作", "点输入框右侧麦克风开始说话；Enter 结束录音；Esc 取消。", ""),
   ]);
   const sttPresets = [
-    { label: "Groq Whisper", url: "https://api.groq.com/openai/v1", model: "whisper-large-v3-turbo" },
-    { label: "SiliconFlow SenseVoice", url: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/SenseVoiceSmall" },
-    { label: "OpenAI Whisper", url: "https://api.openai.com/v1", model: "whisper-1" },
-    { label: "本机 Whisper 服务", url: "http://127.0.0.1:8000/v1", model: "Systran/faster-whisper-small" },
+    { value: "custom", label: "手动填写 / 自定义接口", url: "", model: "" },
+    { value: "groq", label: "Groq Whisper（海外快 · 免费额度高）", url: "https://api.groq.com/openai/v1", model: "whisper-large-v3-turbo" },
+    { value: "siliconflow", label: "硅基流动国内站 api.siliconflow.cn · SenseVoice", url: "https://api.siliconflow.cn/v1", model: "FunAudioLLM/SenseVoiceSmall" },
+    { value: "siliconflow-intl", label: "硅基流动国际站 api.siliconflow.com · SenseVoice", url: "https://api.siliconflow.com/v1", model: "FunAudioLLM/SenseVoiceSmall" },
+    { value: "openai", label: "OpenAI Whisper（官方接口）", url: "https://api.openai.com/v1", model: "whisper-1" },
+    { value: "local-http", label: "本机 Whisper 接口（127.0.0.1:8000）", url: "http://127.0.0.1:8000/v1", model: "Systran/faster-whisper-small" },
   ];
-  const sttPresetRow = createRow("快速预设", "一键填入常见免下载语音识别服务地址与模型（随后填写密钥并保存）", createButtonGroup(
-    sttPresets.map((preset) => actionButton("oc-voice-stt-preset-" + preset.label.toLowerCase().replace(/[^a-z0-9]+/g, "-"), preset.label, () => {
-      setField("stt_base_url", preset.url);
-      setField("stt_model", preset.model);
-    }, "ghost"))
-  ));
-  const sttKeyControl = createRow("STT API 密钥", "密钥只加密写入本机后台，不会回显；留空表示不更改。", ui.createComponent(ui.TextInputV2, {
+  function currentSttPreset() {
+    const url = String(currentValue("stt_base_url") || "").trim();
+    const model = String(currentValue("stt_model") || "").trim();
+    return sttPresets.find((preset) => preset.value !== "custom" && preset.url === url && preset.model === model) || sttPresets[0];
+  }
+  const sttPresetControl = createRow("常用服务模板", "选一个自动填好接口网址与模型名，随后只需填 API 密钥", ui.createComponent(ui.SelectV2, {
+    appearance: "inline",
+    "data-testid": "oc-voice-stt-preset",
+    get disabled() { return savingDisabled(); },
+    get options() { return sttPresets; },
+    get current() { return currentSttPreset(); },
+    value: (option) => option.value,
+    label: (option) => option.label,
+    onSelect: (option) => {
+      if (option && option.value !== "custom") {
+        setField("stt_base_url", option.url);
+        setField("stt_model", option.model);
+      }
+    },
+  }));
+  const sttKeyControl = createRow("API 密钥", "仅加密保存在本机，不会显示已存密钥；本机免密钥服务可留空", ui.createComponent(ui.TextInputV2, {
     id: "oc-voice-stt-api-key",
     type: "password",
     maxLength: 2048,
     autocomplete: "new-password",
-    "aria-label": "STT API 密钥",
-    placeholder: "输入 STT 密钥（若使用免鉴权本机服务可留空）",
+    "aria-label": "在线语音接口 API 密钥",
+    placeholder: "输入服务商提供的 API Key（留空表示不修改）",
     get disabled() { return savingDisabled(); },
     get value() { return sttKey(); },
     onInput: (event) => { setSttKey(event.currentTarget.value); setClearSttKey(false); },
   }));
-  const sttKeyStatus = statusTextNode("oc-voice-stt-key-status", () => Boolean(currentValue("stt_key_configured")) ? "已保存 STT 密钥（不会回显）" : "尚未保存 STT 密钥");
-  const clearSttKeyButton = actionButton("oc-voice-stt-clear-key", () => clearSttKey() ? "撤销清除 STT 密钥" : "清除已保存 STT 密钥", () => {
+  const sttKeyStatus = statusTextNode("oc-voice-stt-key-status", () => Boolean(currentValue("stt_key_configured")) ? "已保存密钥（不会回显）" : "尚未保存密钥");
+  const clearSttKeyButton = actionButton("oc-voice-stt-clear-key", () => clearSttKey() ? "撤销清除密钥" : "清除已保存密钥", () => {
     if (clearSttKey()) {
       setClearSttKey(false);
     } else {
@@ -825,35 +1048,88 @@ function __ocVoiceNativeSettingsV2(props) {
       setClearSttKey(true);
     }
   }, "ghost");
+  const sttModelPicker = createRemoteModelPicker({
+    urlField: "stt_base_url",
+    modelField: "stt_model",
+    timeoutField: "stt_timeout",
+    rpcMethod: "listSttModels",
+    getKey: optionalSttKey,
+    selectTestId: "oc-voice-stt-model-select",
+    buttonId: "oc-voice-stt-fetch-models",
+    statusTestId: "oc-voice-stt-models-status",
+  });
   const sttTestStatus = statusTextNode("oc-voice-stt-test-status", sttTestText);
   const sttApiFields = ui.createComponent(ui.Show, {
     get when() { const b = currentValue("backend"); return b === "auto" || b === "openai-api"; },
     get children() {
       return [
-        sttPresetRow,
-        inputControl("oc-voice-stt-base-url", "STT 接口地址", "OpenAI 兼容语音转写接口（/v1/audio/transcriptions）", "stt_base_url", { type: "url", maxlength: 2048, placeholder: "https://api.groq.com/openai/v1" }),
-        inputControl("oc-voice-stt-model", "STT 模型名称", "例如 whisper-large-v3-turbo 或 FunAudioLLM/SenseVoiceSmall", "stt_model", { maxlength: 200, placeholder: "whisper-large-v3-turbo" }),
-        inputControl("oc-voice-stt-timeout", "STT 请求超时", "秒，范围 5 到 120", "stt_timeout", { type: "number", min: 5, max: 120, step: 1 }),
+        sttPresetControl,
+        inputControl("oc-voice-stt-base-url", "在线接口地址", "支持 Groq / 硅基流动 / OpenAI 等兼容语音转写接口", "stt_base_url", { type: "url", maxlength: 2048, placeholder: "https://api.groq.com/openai/v1" }),
         sttKeyControl,
-        createRow("STT 密钥状态", "", sttKeyStatus),
-        createRow("STT 密钥操作", "清除操作会在保存时生效。", createButtonGroup([clearSttKeyButton])),
-        createRow("STT 连接测试", "发送极短静音片段验证地址、模型与密钥是否可用。", createButtonGroup([
-          actionButton("oc-voice-stt-test", "测试识别接口", () => { void testSttConnection(); }, "neutral", () => sttTestBusy()),
+        sttModelPicker,
+        inputControl("oc-voice-stt-model", "在线模型名称", "选上方拉取结果或模板会自动填入，也可手动修改", "stt_model", { maxlength: 200, placeholder: "点上方「获取模型」自动填入，或手动填写" }),
+        createRow("密钥与连接测试", "发送一段极短静音测试接口地址、模型和密钥是否可用。", createButtonGroup([
+          sttKeyStatus,
+          clearSttKeyButton,
+          actionButton("oc-voice-stt-test", "测试在线连接", () => { void testSttConnection(); }, "neutral", () => sttTestBusy()),
+          sttTestStatus,
         ])),
-        createRow("STT 测试结果", "", sttTestStatus),
       ];
     },
+  });
+  function localModelList() {
+    const models = modelCatalog().models;
+    return Array.isArray(models) && models.length > 0 ? models : defaultModelCatalog.models;
+  }
+  function selectedLocalModelSpec() {
+    const models = localModelList();
+    return models.find((item) => item.id === selectedModelId()) || models[0];
+  }
+  function localModelSelectOptions() {
+    return localModelList().map((item) => ({
+      value: item.id,
+      label: item.label + " · " + item.size_hint + (item.installed ? "（已下载）" : "（未下载）"),
+    }));
+  }
+  const localModelActionStatus = statusTextNode("oc-voice-local-model-status", () => {
+    if (modelActionText()) return modelActionText();
+    const spec = selectedLocalModelSpec();
+    if (!spec) return "";
+    return spec.active ? "当前正在使用此模型" : (spec.installed ? "本机已有此模型，点击左侧按钮即可启用" : "点击左侧按钮可自动下载并配置");
   });
   const localModelFields = ui.createComponent(ui.Show, {
     get when() { const b = currentValue("backend"); return b === "auto" || b === "faster-whisper" || b === "mlx"; },
     get children() {
       return [
         deviceControl,
-        inputControl("oc-voice-model-path", "本地模型目录（可选）", "仅在使用本地高精度 Whisper/MLX 模型时填写；免下载方案无需填写", "model_path", { type: "text", placeholder: "未安装本地模型时留空即可", maxlength: 1024 }),
+        createRow("推荐离线模型", "选一个适合你电脑的模型（显卡好选 turbo，无显卡选 small）", ui.createComponent(ui.SelectV2, {
+          appearance: "inline",
+          "data-testid": "oc-voice-local-model-preset",
+          get disabled() { return savingDisabled() || modelDownloadBusy(); },
+          get options() { return localModelSelectOptions(); },
+          get current() { return optionFor(localModelSelectOptions(), selectedModelId()); },
+          value: (option) => option.value,
+          label: (option) => option.label,
+          onSelect: (option) => { if (option) { setSelectedModelId(option.value); setModelActionText(""); } },
+        })),
+        createRow("一键下载与启用", () => {
+          const spec = selectedLocalModelSpec();
+          return spec ? spec.description : "点击后自动下载并填入下方目录";
+        }, createButtonGroup([
+          actionButton("oc-voice-local-model-action", () => {
+            if (modelDownloadBusy()) return "正在处理…";
+            const spec = selectedLocalModelSpec();
+            if (spec && spec.active) return "当前已在使用";
+            if (spec && spec.installed) return "启用此模型";
+            return "一键下载并启用";
+          }, () => { void downloadOrUseSelectedModel(); }, "neutral", () => modelDownloadBusy() || Boolean(selectedLocalModelSpec() && selectedLocalModelSpec().active)),
+          localModelActionStatus,
+        ])),
+        inputControl("oc-voice-model-path", "本机离线模型文件夹", "也可手动填其他已下载的 Whisper / SenseVoice 模型目录；用在线接口时留空即可", "model_path", { type: "text", placeholder: "点击上方一键下载会自动填好，或手动填路径", maxlength: 1024 }),
       ];
     },
   });
-  const recognition = createSection("识别", [
+  const recognition = createSection("语音识别（二选一即可）", [
     backendControl,
     sttApiFields,
     localModelFields,
@@ -861,12 +1137,13 @@ function __ocVoiceNativeSettingsV2(props) {
   const advanced = ui.createComponent(ui.SettingsListV2, {
     get children() {
       return [
-        inputControl("oc-voice-beam-size", "解码宽度", "较低的值通常更快", "beam_size", { type: "number", min: 1, max: 5, step: 1 }),
-        inputControl("oc-voice-cpu-threads", "CPU 线程数", "CPU 识别时使用的线程数", "cpu_threads", { type: "number", min: 1, max: 128, step: 1 }),
-        inputControl("oc-voice-idle-seconds", "模型空闲释放", "秒，空闲一段时间后释放模型内存", "idle_seconds", { type: "number", min: 30, max: 86400, step: 1 }),
-        createRow("技术词与识别提示", "帮助识别项目名称和专业词汇", ui.createComponent(ui.TextField, {
+        inputControl("oc-voice-beam-size", "解码宽度（本机模型）", "数值越小越快，越大越准，一般保持 1 即可", "beam_size", { type: "number", min: 1, max: 5, step: 1 }),
+        inputControl("oc-voice-cpu-threads", "CPU 线程数（本机模型）", "纯 CPU 运行本机模型时使用的线程数", "cpu_threads", { type: "number", min: 1, max: 128, step: 1 }),
+        inputControl("oc-voice-stt-timeout", "在线接口超时", "秒，范围 5 到 120", "stt_timeout", { type: "number", min: 5, max: 120, step: 1 }),
+        inputControl("oc-voice-idle-seconds", "空闲释放时间（本机模型）", "秒，多久没说话后自动释放模型占用的内存或显存", "idle_seconds", { type: "number", min: 30, max: 86400, step: 1 }),
+        createRow("专业术语识别提示", "写上常用项目名或英文词汇，帮助提高识别准确度", ui.createComponent(ui.TextField, {
           name: "initial_prompt",
-          label: "技术词与识别提示",
+          label: "专业术语识别提示",
           hideLabel: true,
           multiline: true,
           rows: 3,
@@ -879,7 +1156,7 @@ function __ocVoiceNativeSettingsV2(props) {
       ];
     },
   });
-  ui.insert(mainSections, [common, recognition, textProcessing, vocabularySection, vocabularyDetails, aiSection, textTools]);
+  ui.insert(mainSections, [recognition, common, textProcessing, vocabularySection, vocabularyDetails, aiSection, textTools]);
   const tabBody = mainSections.parentNode;
   while (mainSections.firstChild) tabBody.insertBefore(mainSections.firstChild, mainSections);
   mainSections.remove();
@@ -941,6 +1218,7 @@ function __ocVoiceNativeSettingsV2(props) {
   ui.onCleanup(() => {
     disposed = true;
     readRun += 1;
+    clearModelPoll();
     if (vocabularyFileInput) vocabularyFileInput.removeEventListener("change", onVocabularyFileChange);
     if (navigator.mediaDevices && typeof navigator.mediaDevices.removeEventListener === "function") {
       navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);

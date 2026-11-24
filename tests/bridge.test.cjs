@@ -14,8 +14,9 @@ async function fixture(t, overrides = {}) {
     if (req.headers.authorization !== "Bearer " + token) return json(401, { error: "unauthorized" });
     if (url.pathname === "/v1/config") return json(200, { beam_size: 1, max_seconds: 120, port: server.address().port });
     if (url.pathname === "/v1/status") return json(200, { model_state: "ready", device: "fake" });
-    if (req.method === "POST" && ["/v1/text", "/v1/rewrite/test", "/v1/stt/test"].includes(url.pathname)) {
-      let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => { const body = JSON.parse(data); events.at(-1).body = body; json(200, url.pathname === "/v1/text" ? { raw_text: body.text, local_text: "local", text: "preview", processing_warning: null, timings: { local_seconds: 0.01 } } : { ok: true, message: "connected" }); }); return;
+    if (req.method === "GET" && url.pathname === "/v1/models") return json(200, { recommended_id: "faster-whisper-small", models: [{ id: "faster-whisper-small", installed: false, active: false }], download: { state: "idle", id: "", message: "" } });
+    if (req.method === "POST" && ["/v1/text", "/v1/rewrite/test", "/v1/stt/test", "/v1/rewrite/models", "/v1/stt/models", "/v1/models/download"].includes(url.pathname)) {
+      let data = ""; req.on("data", chunk => { data += chunk; }); req.on("end", () => { const body = JSON.parse(data); events.at(-1).body = body; json(url.pathname === "/v1/models/download" ? 202 : 200, url.pathname === "/v1/text" ? { raw_text: body.text, local_text: "local", text: "preview", processing_warning: null, timings: { local_seconds: 0.01 } } : url.pathname === "/v1/models/download" ? { ok: true, installed: false, catalog: { download: { state: "downloading", id: body.id } } } : (url.pathname === "/v1/stt/models" || url.pathname === "/v1/rewrite/models") ? { ok: true, models: ["model-alpha", "model-beta"], message: "已获取 2 个可用模型。" } : { ok: true, message: "connected" }); }); return;
     }
     if (req.method === "POST" && url.pathname.endsWith("/use-local")) { const id = url.pathname.split("/")[3]; jobs.set(id, { id, state: "done", text: "local fallback", raw_text: "raw speech", local_text: "local fallback", processing_warning: "AI skipped", timings: { rewrite_seconds: 0.02 } }); return json(200, jobs.get(id)); }
     if (req.method === "POST" && url.pathname === "/v1/jobs") {
@@ -251,4 +252,72 @@ test("STT connection test forwards optional stt_api_key and rejects untrusted se
     config: { backend: "openai-api", stt_base_url: "https://api.groq.com/openai/v1", stt_model: "whisper-large-v3-turbo" },
     stt_api_key: "temporary-stt-key",
   });
+});
+
+test("model catalog and download IPC handlers validate senders and arguments", async t => {
+  const f = await fixture(t), handlers = new Map(), app = new EventEmitter();
+  delete global.__ocVoiceV2; t.after(() => { delete global.__ocVoiceV2; });
+  install({ app, ipcMain: { removeHandler: name => handlers.delete(name), handle: (name, fn) => handlers.set(name, fn) } }, { voiceHome: f.directory, home: f.directory });
+  const sender = new EventEmitter(); sender.id = 11; sender.mainFrame = { url: "oc://renderer/index.html" }; sender.getURL = () => sender.mainFrame.url; sender.isDestroyed = () => false; sender.send = () => {};
+  assert.equal((await handlers.get("oc-voice:models")({ sender, senderFrame: {} })).code, "UNTRUSTED_SENDER");
+  assert.equal((await handlers.get("oc-voice:download-model")({ sender, senderFrame: sender.mainFrame }, "")).code, "INVALID_MODEL");
+  const catalog = await handlers.get("oc-voice:models")({ sender, senderFrame: sender.mainFrame });
+  assert.equal(catalog.recommended_id, "faster-whisper-small");
+  const download = await handlers.get("oc-voice:download-model")({ sender, senderFrame: sender.mainFrame }, "faster-whisper-small", true);
+  assert.equal(download.ok, true);
+  assert.deepEqual(f.events.find(e => e.path === "/v1/models/download").body, { id: "faster-whisper-small", activate: true });
+});
+
+test("cloud model listing IPC handlers forward optional keys and reject untrusted senders", async t => {
+  const f = await fixture(t), handlers = new Map(), app = new EventEmitter();
+  delete global.__ocVoiceV2; t.after(() => { delete global.__ocVoiceV2; });
+  install({ app, ipcMain: { removeHandler: name => handlers.delete(name), handle: (name, fn) => handlers.set(name, fn) } }, { voiceHome: f.directory, home: f.directory });
+  const sender = new EventEmitter(); sender.id = 12; sender.mainFrame = { url: "oc://renderer/index.html" }; sender.getURL = () => sender.mainFrame.url; sender.isDestroyed = () => false; sender.send = () => {};
+  assert.equal((await handlers.get("oc-voice:stt-models")({ sender, senderFrame: {} }, {})).code, "UNTRUSTED_SENDER");
+  assert.equal((await handlers.get("oc-voice:rewrite-models")({ sender, senderFrame: {} }, {})).code, "UNTRUSTED_SENDER");
+  const sttRes = await handlers.get("oc-voice:stt-models")({ sender, senderFrame: sender.mainFrame }, { stt_base_url: "https://api.groq.com/openai/v1" }, "temp-stt");
+  assert.deepEqual(sttRes.models, ["model-alpha", "model-beta"]);
+  assert.deepEqual(f.events.find(e => e.path === "/v1/stt/models").body, { config: { stt_base_url: "https://api.groq.com/openai/v1" }, stt_api_key: "temp-stt" });
+  const rwRes = await handlers.get("oc-voice:rewrite-models")({ sender, senderFrame: sender.mainFrame }, { rewrite_base_url: "https://api.openai.com/v1" }, "temp-rw");
+  assert.deepEqual(rwRes.models, ["model-alpha", "model-beta"]);
+  assert.deepEqual(f.events.find(e => e.path === "/v1/rewrite/models").body, { config: { rewrite_base_url: "https://api.openai.com/v1" }, rewrite_api_key: "temp-rw" });
+});
+
+test("desktop transcribe long-polls with after_state for low-latency state transitions", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "oc-voice-longpoll-"));
+  const token = crypto.randomBytes(32).toString("base64url");
+  const queries = [];
+  let pollCount = 0;
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const json = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
+    if (url.pathname === "/health") return json(200, { service: "opencode-local-voice", protocol: 1, proof: crypto.createHmac("sha256", token).update(url.searchParams.get("challenge")).digest("hex") });
+    if (req.headers.authorization !== "Bearer " + token) return json(401, { error: "unauthorized" });
+    if (req.method === "POST" && url.pathname === "/v1/jobs") {
+      req.resume();
+      req.on("end", () => json(202, { id: req.headers["x-job-id"], state: "queued" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/v1/jobs/")) {
+      queries.push({ wait: url.searchParams.get("wait"), after: url.searchParams.get("after_state") });
+      pollCount += 1;
+      const id = url.pathname.split("/").pop();
+      if (pollCount === 1) return json(200, { id, state: "transcribing" });
+      return json(200, { id, state: "done", text: "fast result", raw_text: "fast result", local_text: "fast result", timings: { audio_seconds: 1 } });
+    }
+    json(404, { error: "not found" });
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ port: server.address().port }));
+  fs.writeFileSync(path.join(directory, "token"), token);
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }); });
+  const client = createClient({ voiceHome: directory, home: directory, jobTimeout: 2000 });
+  const states = [];
+  const res = await client.transcribe(Buffer.alloc(100), "audio/wav", crypto.randomUUID(), p => states.push(p.state));
+  assert.equal(res.text, "fast result");
+  assert.deepEqual(states, ["submitting", "transcribing", "done"]);
+  assert.equal(queries.length, 2);
+  assert.equal(queries[0].after, null);
+  assert.equal(queries[1].after, "transcribing");
+  assert.ok(Number(queries[1].wait) > 0);
 });

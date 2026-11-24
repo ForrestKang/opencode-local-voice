@@ -283,7 +283,10 @@ async function prepare(version, updater, electron, options = {}) {
   let session;
   try {
     if (currentSession && !currentSession.cancelled && !currentSession.finished) fail("another recovery hand-off is already active");
-    const configPath = configPathFor(electron, options);
+    const rawConfigPath = configPathFor(electron, options);
+    const configPath = typeof fsImpl.realpathSync?.native === "function"
+      ? (() => { try { return fsImpl.realpathSync.native(rawConfigPath); } catch (_) { return rawConfigPath; } })()
+      : rawConfigPath;
     const active = options.config && typeof options.config === "object" ? options.config : readJson(fsImpl, configPath);
     const checked = validateActive(active, fsImpl, updater, options);
     const expectedVersion = normalVersion(version);

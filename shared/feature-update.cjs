@@ -60,6 +60,106 @@ function recover(entries, directory, p, options = {}) {
     } else if (fs.existsSync(target)) fs.unlinkSync(target); // Explicit known file only; never remove directories.
   }
 }
+function directoryBytes(directory) {
+  let total = 0;
+  try {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) total += directoryBytes(full);
+      else if (entry.isFile()) total += fs.statSync(full).size;
+    }
+  } catch (_) {}
+  return total;
+}
+function removeDuplicateLedgerArchive(directory) {
+  const ledger = path.join(directory, "asar-ledger");
+  if (!fs.existsSync(ledger)) return 0;
+  let freed = 0;
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name === "app.asar.original") {
+        // feature-update keeps a SHA-256 verified app.asar.before in the same transaction.
+        freed += fs.statSync(full).size;
+        fs.unlinkSync(full);
+      }
+    }
+  }
+  try { walk(ledger); } catch (_) {}
+  return freed;
+}
+function pruneBackups(backupRoot, options = {}) {
+  const root = path.resolve(backupRoot);
+  if (!fs.existsSync(root) || !fs.lstatSync(root).isDirectory() || fs.lstatSync(root).isSymbolicLink()) {
+    return { removed: [], kept: [], freedBytes: 0 };
+  }
+  const realRoot = real(root);
+  const keepApplied = Number.isInteger(options.keepApplied) && options.keepApplied >= 1 ? options.keepApplied : 1;
+  const keepOriginal = options.keepOriginal !== false;
+  const currentAppVersion = typeof options.currentAppVersion === "string" && options.currentAppVersion ? options.currentAppVersion : null;
+  const pinned = new Set((options.keepTransactions || []).map(item => real(item)));
+  const dryRun = Boolean(options.dryRun);
+
+  const records = [];
+  for (const entry of fs.readdirSync(realRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !entry.name.startsWith("v0.2.1-")) continue;
+    const dir = path.join(realRoot, entry.name);
+    const manifestPath = path.join(dir, "feature-manifest.json");
+    if (!fs.existsSync(manifestPath)) continue;
+    let manifest;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); }
+    catch (_) { continue; }
+    if (!manifest || manifest.schema !== 1 || manifest.featureVersion !== "0.2.1") continue;
+    const stamp = Date.parse(manifest.appliedAt || manifest.createdAt || "") || fs.statSync(manifestPath).mtimeMs;
+    records.push({ dir, realDir: real(dir), manifest, stamp });
+  }
+
+  const keepSet = new Set();
+  for (const rec of records) {
+    if (rec.manifest.state === "prepared" || pinned.has(rec.realDir)) keepSet.add(rec.realDir);
+  }
+
+  const groups = new Map();
+  for (const rec of records) {
+    if (rec.manifest.state !== "applied") continue;
+    const appKey = (process.platform === "win32" ? String(rec.manifest.app || "").toLowerCase() : String(rec.manifest.app || "")) + "::" + String(rec.manifest.appVersion || "");
+    if (!groups.has(appKey)) groups.set(appKey, []);
+    groups.get(appKey).push(rec);
+  }
+  for (const list of groups.values()) {
+    list.sort((a, b) => b.stamp - a.stamp);
+    const appVersion = list[0].manifest.appVersion;
+    if (currentAppVersion && appVersion !== currentAppVersion) continue;
+    const latestKept = list.slice(0, keepApplied);
+    for (const rec of latestKept) keepSet.add(rec.realDir);
+    if (keepOriginal && list.length > keepApplied) {
+      // Preserve the earliest applied transaction whose source hash differs so stock app.asar remains recoverable.
+      const earliest = list[list.length - 1];
+      const latestHashes = new Set(latestKept.map(item => item.manifest.sourceAsarSha256));
+      if (!latestHashes.has(earliest.manifest.sourceAsarSha256)) keepSet.add(earliest.realDir);
+    }
+  }
+
+  const removed = [];
+  const kept = [];
+  let freedBytes = 0;
+  for (const rec of records) {
+    if (keepSet.has(rec.realDir)) {
+      if (!dryRun) freedBytes += removeDuplicateLedgerArchive(rec.dir);
+      kept.push(rec.dir);
+      continue;
+    }
+    if (!inside(realRoot, rec.realDir)) continue;
+    const bytes = directoryBytes(rec.dir);
+    if (!dryRun) fs.rmSync(rec.dir, { recursive: true, force: true });
+    freedBytes += bytes;
+    removed.push(rec.dir);
+  }
+  return { removed, kept, freedBytes };
+}
 function save(directory, manifest) { patcher.writeAtomic(path.join(directory, "feature-manifest.json"), Buffer.from(JSON.stringify(manifest, null, 2) + "\n")); }
 function discardIncomplete(directory, error, phase) {
   if (!directory) throw new Error(error.message + "; feature " + phase + " failed; no files were deployed");
@@ -103,6 +203,18 @@ function apply(args, hooks = {}) {
       (hooks.checkClosed || checkClosed)();
     } });
     manifest.state = "applied"; manifest.appliedAt = new Date().toISOString(); save(directory, manifest);
+    // Avoid keeping two identical full app.asar copies inside one transaction and roll old backups.
+    removeDuplicateLedgerArchive(directory);
+    if (args.prune !== false) {
+      try {
+        pruneBackups(root, {
+          keepApplied: 1,
+          keepOriginal: true,
+          currentAppVersion: current.version,
+          keepTransactions: [directory],
+        });
+      } catch (_) {}
+    }
   } catch (error) {
     try {
       const actualHash = support.inspectAsarFile(p.input).hash;
@@ -160,9 +272,16 @@ function restore(args, hooks = {}) {
 function runCli(argv) {
   const command = argv.shift(), args = {};
   while (argv.length) { const key = argv.shift(); if (!/^--[a-z-]+$/.test(key)) throw new Error("invalid argument"); const name = key.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase()); if (Object.hasOwn(args, name)) throw new Error("duplicate argument"); args[name] = name === "dryRun" ? true : argv.shift(); }
-  if (!["apply", "restore"].includes(command)) throw new Error("use apply or restore");
-  const result = command === "apply" ? apply(args) : restore(args);
+  if (!["apply", "restore", "prune"].includes(command)) throw new Error("use apply, restore, or prune");
+  let result;
+  if (command === "apply") result = apply(args);
+  else if (command === "restore") result = restore(args);
+  else result = pruneBackups(args.backupRoot, {
+    currentAppVersion: args.appVersion || null,
+    keepApplied: args.keepApplied ? Number(args.keepApplied) : 1,
+    dryRun: Boolean(args.dryRun),
+  });
   process.stdout.write(JSON.stringify(result) + "\n");
 }
 if (require.main === module) { try { runCli(process.argv.slice(2)); } catch (error) { console.error("[feature-update] " + error.message); process.exitCode = 1; } }
-module.exports = { apply, restore, FILES, SETTINGS };
+module.exports = { apply, restore, pruneBackups, FILES, SETTINGS };

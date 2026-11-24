@@ -68,7 +68,7 @@ npm run package
 | `extras/voice-input.ts` | 可选的 TUI 草稿工具 |
 | `tools`、`tests` | 打包、源检查和回归测试 |
 
-渲染器的权威实现是 `shared/oc-mic.js`。修改它以后，按项目约定运行 `npm run sync-renderer`，并检查生成的兼容副本。涉及 OpenCode DOM 或 ASAR 结构的改动必须在结构不匹配时安全失败，不能用宽泛替换破坏宿主应用。
+渲染器的唯一权威实现是 `shared/oc-mic.js`（不再保留各平台重复副本）。涉及 OpenCode DOM 或 ASAR 结构的改动必须在结构不匹配时安全失败，不能用宽泛替换破坏宿主应用。
 
 ## 提交问题和 Pull Request
 

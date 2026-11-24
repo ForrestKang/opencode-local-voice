@@ -53,6 +53,9 @@ function createClient(options = {}) {
   const python = platform === "win32" && /^python(?:\d+(?:\.\d+)*)?\.exe$/i.test(path.basename(configuredPython))
     ? path.join(path.dirname(configuredPython), path.basename(configuredPython).replace(/^python/i, "pythonw")) : configuredPython;
   const server = options.server || process.env.OPENCODE_VOICE_SERVER || path.join(base, "whisper", "stt_server.py");
+  const explicitDaemon = options.daemon || process.env.OPENCODE_VOICE_DAEMON || "";
+  const defaultDaemon = path.join(base, "whisper", platform === "win32" ? "oc-voice-daemon.exe" : "oc-voice-daemon");
+  const daemon = explicitDaemon || defaultDaemon;
   const spawn = options.spawn || childProcess.spawn;
   const requestImpl = options.request || http.request;
   const startupTimeout = options.startupTimeout || 12000;
@@ -77,7 +80,7 @@ function createClient(options = {}) {
       return token;
     } catch (_) { throw voiceError("TOKEN_MISSING", "语音服务凭据不存在或损坏，请先运行安装器"); }
   }
-  function request(method, route, body, authenticated = true, timeout = 5000) {
+  function request(method, route, body, authenticated = true, timeout = 5000, agent = false) {
     return new Promise((resolve, reject) => {
       let payload = body == null ? null : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
       const headers = payload ? { "Content-Length": payload.length, "Content-Type": Buffer.isBuffer(body) ? "audio/wav" : "application/json" } : {};
@@ -90,7 +93,7 @@ function createClient(options = {}) {
         if (error) reject(error); else resolve(value);
       };
       try {
-        req = requestImpl({ host: "127.0.0.1", port: settings.port, path: route, method, headers, agent: false }, response => {
+        req = requestImpl({ host: "127.0.0.1", port: settings.port, path: route, method, headers, agent }, response => {
           const chunks = []; let size = 0;
           response.on("data", chunk => { size += chunk.length; if (size > 1024 * 1024) { req.destroy(); finish(voiceError("BAD_RESPONSE", "语音服务响应过大")); } else chunks.push(Buffer.from(chunk)); });
           response.on("error", error => finish(error));
@@ -125,9 +128,27 @@ function createClient(options = {}) {
     }
     return response;
   }
+  function selectBackendCommand() {
+    const hasDaemon = Boolean(daemon) && fs.existsSync(daemon);
+    const hasPython = fs.existsSync(python) && fs.existsSync(server);
+    const explicitPython = Boolean(options.python || process.env.OPENCODE_VOICE_PYTHON);
+    if (explicitDaemon) {
+      if (!hasDaemon) throw voiceError("SERVICE_NOT_INSTALLED", "Rust 语音守护进程不存在：" + daemon);
+      return { executable: daemon, args: ["--serve"] };
+    }
+    if (hasDaemon && !explicitPython) {
+      let configuredBackend = "";
+      try { configuredBackend = String(configOnDisk().backend || "").trim(); } catch (_) {}
+      // Prefer the zero-Python Rust daemon when Python is absent or a Rust-native backend is selected.
+      const rustNative = configuredBackend === "openai-compatible" || configuredBackend === "whisper-cli" || configuredBackend === "sherpa-onnx";
+      if (!hasPython || rustNative) return { executable: daemon, args: ["--serve"] };
+    }
+    if (!hasPython) throw voiceError("SERVICE_NOT_INSTALLED", "本地语音服务未完整安装，请运行安装器");
+    return { executable: python, args: [server, "--serve"] };
+  }
   function boot() {
     if (processHandle && processHandle.exitCode === null && !startupFailure) return;
-    if (!fs.existsSync(python) || !fs.existsSync(server)) throw voiceError("SERVICE_NOT_INSTALLED", "本地语音服务未完整安装，请运行安装器");
+    const command = selectBackendCommand();
     startupFailure = null;
     let logFd;
     try {
@@ -135,7 +156,7 @@ function createClient(options = {}) {
       logFd = fs.openSync(path.join(voiceHome, "service.log"), "a", 0o600);
       // Retain detachment: libuv otherwise kills Windows children on parent
       // exit. pythonw prevents console allocation through the venv launcher.
-      processHandle = spawn(python, [server, "--serve"], { windowsHide: true, detached: true,
+      processHandle = spawn(command.executable, command.args, { windowsHide: true, detached: true,
         stdio: ["ignore", logFd, logFd], env: { ...process.env, OPENCODE_VOICE_HOME: voiceHome } });
       processHandle.on("error", error => { startupFailure = voiceError("SERVICE_START_FAILED", "语音服务启动失败：" + error.code); });
       processHandle.on("exit", code => { if (code && !startupFailure) startupFailure = voiceError("SERVICE_START_FAILED", "语音服务退出，错误码 " + code); });
@@ -190,6 +211,7 @@ function createClient(options = {}) {
     // The id travels in the URL as well as the explicit header; request-local
     // headers avoid global mutable ids when several windows submit at once.
     const savedRequest = requestImpl;
+    const pollAgent = options.request ? false : new http.Agent({ keepAlive: true, maxSockets: 2, keepAliveMsecs: 1500 });
     const settings = configOnDisk();
     const deadline = Date.now() + jobTimeout;
     activeJobs.add(id);
@@ -200,7 +222,7 @@ function createClient(options = {}) {
       const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
       const timer = setTimeout(() => { if (req) req.destroy(); finish(voiceError("SERVICE_TIMEOUT", "录音提交超时")); }, 10000);
       try {
-        req = savedRequest({ host: "127.0.0.1", port: settings.port, path: "/v1/jobs", method: "POST", agent: false,
+        req = savedRequest({ host: "127.0.0.1", port: settings.port, path: "/v1/jobs", method: "POST", agent: pollAgent,
           headers: { Authorization: "Bearer " + readToken(), "X-Job-Id": id, "Content-Type": "audio/wav", "Content-Length": audio.length } }, response => {
           let data = "";
           response.on("data", chunk => { data += chunk; if (data.length > 65536) { req.destroy(); finish(voiceError("BAD_RESPONSE", "提交响应过大")); } });
@@ -219,22 +241,42 @@ function createClient(options = {}) {
       // Recover that same job, without uploading or recognizing it twice.
       try { progress({ id, state: "recovering" }); } catch (_) {}
       await ensure();
-      try { const accepted = await request("GET", "/v1/jobs/" + id); if (accepted.id === id) return accepted; }
+      try { const accepted = await request("GET", "/v1/jobs/" + id, null, true, 5000, pollAgent); if (accepted.id === id) return accepted; }
       catch (_) { /* Preserve the submission error if no accepted job is proven. */ }
       throw error;
     });
     if (created.id !== id) throw voiceError("BAD_RESPONSE", "语音任务标识不匹配");
     let previous = "";
+    const liveStates = new Set(["queued", "loading", "transcribing", "rewriting"]);
     while (Date.now() < deadline) {
       if (isCancelled(id)) return { error: "转写已取消", code: "CANCELLED" };
-      const job = await request("GET", "/v1/jobs/" + id);
-      if (job.state !== previous) { previous = job.state; try { progress({ id, state: job.state, timings: job.timings,
+      const remainingMs = Math.max(10, deadline - Date.now());
+      let route = "/v1/jobs/" + id;
+      let reqTimeout = 5000;
+      if (liveStates.has(previous)) {
+        const waitSec = Math.min(5, Math.max(0.05, remainingMs / 1000));
+        route += "?wait=" + waitSec.toFixed(3) + "&after_state=" + previous;
+        reqTimeout = Math.max(5000, Math.ceil(waitSec * 1000) + 3000);
+      }
+      const pollStarted = Date.now();
+      let job;
+      try {
+        job = await request("GET", route, null, true, reqTimeout, pollAgent);
+      } catch (error) {
+        if (!pollAgent || error.code !== "ECONNRESET" || isCancelled(id)) throw error;
+        job = await request("GET", route, null, true, reqTimeout, false);
+      }
+      const changed = job.state !== previous;
+      if (changed) { previous = job.state; try { progress({ id, state: job.state, timings: job.timings,
         raw_text: job.raw_text, local_text: job.local_text }); } catch (_) {} }
       if (job.state === "done") return { text: job.text || "", raw_text: job.raw_text ?? job.text ?? "",
         local_text: job.local_text ?? job.text ?? "", processing_warning: job.processing_warning || null, timings: job.timings || {}, id };
       if (job.state === "error") return { error: typeof job.error === "string" ? job.error : (job.error && job.error.message) || "识别失败", code: job.code || "INFERENCE_FAILED", id };
       if (job.state === "cancelled") return { error: "转写已取消", code: "CANCELLED", id };
-      await delay(200);
+      // Back off when an older server or test stub ignores ?wait= and replies immediately.
+      if (!changed && Date.now() - pollStarted < 50) {
+        await delay(Math.min(200, Math.max(10, deadline - Date.now())));
+      }
     }
     await cancel(id).catch(() => {});
     return { error: "转写超时，后台任务已取消，可以重试保存的录音", code: "JOB_TIMEOUT", id };
@@ -243,13 +285,20 @@ function createClient(options = {}) {
       // leave a cancellation tombstone, including failures during polling.
       await cancel(id).catch(() => {});
       throw error;
-    } finally { activeJobs.delete(id); }
+    } finally {
+      activeJobs.delete(id);
+      if (pollAgent && typeof pollAgent.destroy === "function") pollAgent.destroy();
+    }
   }
   async function textCall(route, body) { await ensure(); return request("POST", route, body, true, 75000); }
   return { ensure, transcribe, cancel, getConfig: () => call("GET", "/v1/config"), saveConfig: patch => call("PATCH", "/v1/config", patch),
     previewText: (text, config, key) => textCall("/v1/text", { text, config: config || {}, ...(key !== undefined ? { rewrite_api_key: key } : {}) }),
     testRewrite: (config, key) => textCall("/v1/rewrite/test", { config: config || {}, ...(key !== undefined ? { rewrite_api_key: key } : {}) }),
     testStt: (config, key) => textCall("/v1/stt/test", { config: config || {}, ...(key !== undefined ? { stt_api_key: key } : {}) }),
+    listRewriteModels: (config, key) => textCall("/v1/rewrite/models", { config: config || {}, ...(key !== undefined ? { rewrite_api_key: key } : {}) }),
+    listSttModels: (config, key) => textCall("/v1/stt/models", { config: config || {}, ...(key !== undefined ? { stt_api_key: key } : {}) }),
+    listModels: () => call("GET", "/v1/models"),
+    downloadModel: (id, activate = true) => call("POST", "/v1/models/download", { id, activate: activate !== false }),
     useLocal: id => { if (!validId(id)) throw voiceError("INVALID_JOB", "任务标识无效"); return call("POST", "/v1/jobs/" + id + "/use-local", {}); },
     status: () => call("GET", "/v1/status"), warmup: () => call("POST", "/v1/warmup", {}), voiceHome,
     close: () => { for (const id of activeJobs) cancel(id).catch(() => {}); } };
@@ -276,6 +325,13 @@ function install(electron, options = {}) {
   });
   handler("oc-voice:test-rewrite", (_, config, key) => client.testRewrite(config, key));
   handler("oc-voice:test-stt", (_, config, key) => client.testStt(config, key));
+  handler("oc-voice:rewrite-models", (_, config, key) => client.listRewriteModels(config, key));
+  handler("oc-voice:stt-models", (_, config, key) => client.listSttModels(config, key));
+  handler("oc-voice:models", () => client.listModels());
+  handler("oc-voice:download-model", (_, id, activate) => {
+    if (typeof id !== "string" || !id.trim() || id.length > 100) throw voiceError("INVALID_MODEL", "推荐模型标识无效");
+    return client.downloadModel(id.trim(), activate !== false);
+  });
   handler("oc-voice:transcribe", async (event, bytes, mime, id) => {
     if (!validId(id) || owners.has(id)) throw voiceError("INVALID_JOB", "转写任务标识无效或重复");
     const owner = event.sender.id; owners.set(id, owner);

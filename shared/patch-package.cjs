@@ -603,6 +603,10 @@ function preloadSource(input) {
       'previewText:(text,config,key)=>electron.ipcRenderer.invoke("oc-voice:preview-text",text,config,key),' +
       'testRewrite:(config,key)=>electron.ipcRenderer.invoke("oc-voice:test-rewrite",config,key),' +
       'testStt:(config,key)=>electron.ipcRenderer.invoke("oc-voice:test-stt",config,key),' +
+      'listRewriteModels:(config,key)=>electron.ipcRenderer.invoke("oc-voice:rewrite-models",config,key),' +
+      'listSttModels:(config,key)=>electron.ipcRenderer.invoke("oc-voice:stt-models",config,key),' +
+      'listModels:()=>electron.ipcRenderer.invoke("oc-voice:models"),' +
+      'downloadModel:(id,activate)=>electron.ipcRenderer.invoke("oc-voice:download-model",id,activate),' +
       'onProgress:(callback)=>{if(typeof callback!=="function")return ()=>{};const listener=(_event,payload)=>callback(payload);electron.ipcRenderer.on("oc-voice:progress",listener);return ()=>electron.ipcRenderer.removeListener("oc-voice:progress",listener)}' +
       '})}catch(error){console.error("[oc-voice] preload bridge failed",error)}})()',
     PRELOAD_END,
@@ -781,6 +785,63 @@ function patchAsar(inputBuffer, options) {
   };
 }
 
+function checkCompat(inputBuffer, options = {}) {
+  const platform = options.platform || "windows";
+  if (!["windows", "macos", "linux"].includes(platform)) fail("platform must be windows, macos, or linux");
+  const original = inspectAsarBuffer(inputBuffer);
+  const header = original.header;
+  const checks = {};
+  const runCheck = (name, fn) => {
+    try {
+      const detail = fn();
+      checks[name] = { ok: true, ...(detail && typeof detail === "object" ? detail : {}) };
+    } catch (error) {
+      checks[name] = { ok: false, error: error.message };
+    }
+  };
+  let mainText = "";
+  let preloadText = "";
+  let htmlText = "";
+  runCheck("main", () => {
+    mainText = readEntry(inputBuffer, original.dataStart, getEntry(header, MAIN), MAIN).toString("utf8");
+    const bridgeSource = String(options.bridgeSource || fs.readFileSync(path.join(__dirname, "desktop-bridge.cjs"), "utf8"));
+    mainSource(mainText, bridgeSource);
+    return { alreadyPatched: mainText.includes(MAIN_START) };
+  });
+  runCheck("preload", () => {
+    preloadText = readEntry(inputBuffer, original.dataStart, getEntry(header, PRELOAD), PRELOAD).toString("utf8");
+    preloadSource(preloadText);
+    return { alreadyPatched: preloadText.includes(PRELOAD_START) };
+  });
+  runCheck("html", () => {
+    htmlText = readEntry(inputBuffer, original.dataStart, getEntry(header, HTML), HTML).toString("utf8");
+    rendererHtml(htmlText);
+    return { alreadyPatched: htmlText.includes("./oc-voice-v2.js") };
+  });
+  runCheck("nativeSettings", () => {
+    const candidates = findNativeSettingsCandidates(inputBuffer, original);
+    patchNativeSettingsSource(candidates.v2.source, "v2");
+    patchNativeSettingsSource(candidates.legacy.source, "legacy");
+    return { v2: candidates.v2.name, legacy: candidates.legacy.name };
+  });
+  if (platform === "windows") {
+    runCheck("updaterPrompt", () => {
+      const promptModule = findPromptContract(inputBuffer, original);
+      if (mainText) patchUpdaterSource(mainText);
+      return { promptModule };
+    });
+  }
+  const compatible = Object.values(checks).every(item => item.ok);
+  const alreadyPatched = Boolean(checks.main?.alreadyPatched && checks.preload?.alreadyPatched && checks.html?.alreadyPatched);
+  return {
+    compatible,
+    version: original.version,
+    inputHash: sha256(inputBuffer),
+    alreadyPatched,
+    checks,
+  };
+}
+
 function writeAtomic(filename, data) {
   const directory = path.dirname(filename);
   fs.mkdirSync(directory, { recursive: true });
@@ -801,7 +862,7 @@ function parseArgs(argv) {
     if (!key.startsWith("--")) fail("unexpected argument: " + key);
     const name = key.slice(2);
     if (Object.prototype.hasOwnProperty.call(out, name)) fail("duplicate argument: " + key);
-    if (name === "help") { out.help = true; continue; }
+    if (name === "help" || name === "check-compat") { out[name] = true; continue; }
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) fail("missing value for " + key);
     out[name] = value;
@@ -813,8 +874,17 @@ function parseArgs(argv) {
 function runCli(argv) {
   const args = parseArgs(argv);
   if (args.help) {
-    process.stdout.write("Usage: node shared/patch-package.cjs --platform windows|macos|linux --app APP --input APP_ASAR --output PATCHED_ASAR\n");
+    process.stdout.write("Usage: node shared/patch-package.cjs --platform windows|macos|linux --app APP --input APP_ASAR --output PATCHED_ASAR\n       node shared/patch-package.cjs --check-compat [--platform windows|macos|linux] --input APP_ASAR\n");
     return 0;
+  }
+  if (args["check-compat"]) {
+    if (!args.input) fail("--input is required for --check-compat");
+    const platform = args.platform || "windows";
+    const input = path.resolve(args.input);
+    if (!fs.existsSync(input) || !fs.statSync(input).isFile()) fail("--input must name an existing ASAR file");
+    const report = checkCompat(fs.readFileSync(input), { platform });
+    process.stdout.write(JSON.stringify(report) + "\n");
+    return report.compatible ? 0 : 2;
   }
   if (!args.platform || !args.app || !args.input || !args.output) fail("--platform, --app, --input, and --output are required");
   if (!["windows", "macos", "linux"].includes(args.platform)) fail("unsupported platform: " + args.platform);
@@ -845,6 +915,7 @@ module.exports = {
   readEntry,
   inspectAsarBuffer,
   validateAsar,
+  checkCompat,
   patchAsar,
   patchNativeSettingsSource,
   patchUpdaterSource,

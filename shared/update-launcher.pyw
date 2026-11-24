@@ -36,6 +36,7 @@ REQUIRED_PACKAGE_FILES = {
     "shared/update-notify.pyw",
     "shared/maintenance-package.cjs",
     "shared/maintenance-inspect.cjs",
+    "windows/voice-paths.ps1",
     "windows/maintenance-processes.ps1",
     "windows/maintenance-shortcuts.ps1",
     "windows/install-maintenance.ps1",

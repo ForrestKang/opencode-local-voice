@@ -29,7 +29,9 @@ function Find-AppAsar([string]$App) {
   Fail "app.asar not found under $App. Pass -AppPath with the OpenCode installation directory."
 }
 
-$Base = Join-Path $env:USERPROFILE ".config\opencode"
+. (Join-Path $PlatformDir "voice-paths.ps1")
+
+$Base = Resolve-OpencodeBase (Join-Path $env:USERPROFILE ".config\opencode")
 $VoiceHome = if ($env:OPENCODE_VOICE_HOME) { $env:OPENCODE_VOICE_HOME } else { Join-Path $Base "local-voice" }
 $Venv = Join-Path $Base "whisper-venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"

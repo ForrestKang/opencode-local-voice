@@ -15,7 +15,6 @@
     "typecheck": "tsc --project tsconfig.json",
     "check:sources": "node tools/check-sources.cjs",
     "check:docs": "node tools/check-docs.cjs",
-    "sync-renderer": "node tools/sync-renderer.cjs",
     "test:all": "npm run check:sources && npm run check:docs && npm run typecheck && npm test && npm run test:python && npm run test:ui",
     "package": "python tools/package-release.py && python tools/verify-release.py"
   },

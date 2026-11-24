@@ -28,7 +28,7 @@ const REQUIRED_SOURCE = [
   "shared/native-voice-settings.js", "shared/update-bridge.cjs",
   "shared/update-recovery.cjs", "shared/update-launcher.pyw", "shared/update-notify.pyw",
   "shared/maintenance-package.cjs", "shared/maintenance-inspect.cjs", "shared/install-support.py",
-  "windows/maintenance-processes.ps1", "windows/maintenance-shortcuts.ps1",
+  "windows/voice-paths.ps1", "windows/maintenance-processes.ps1", "windows/maintenance-shortcuts.ps1",
 ];
 
 function recoveryError(code, message, details) {

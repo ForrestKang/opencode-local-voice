@@ -2,12 +2,12 @@
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
 const REQUIRED_FILES = ["VERSION",
   ...["patch-package.cjs", "feature-update.cjs", "install-support.cjs", "install-support.py", "voice_server.py", "voice_cli.py", "voice_text.py", "voice_secrets.py", "desktop-bridge.cjs", "oc-mic.js", "native-voice-settings.js", "update-recovery.cjs", "update-bridge.cjs", "update-launcher.pyw", "update-notify.pyw", "maintenance-package.cjs", "maintenance-inspect.cjs"].map(name => "shared/" + name),
-  ...["maintenance-processes.ps1", "maintenance-shortcuts.ps1", "install-maintenance.ps1", "restore-maintenance.ps1", "install-feature-preview.ps1", "Repair-Voice.cmd", "Repair-Voice.ps1", "Restore-Voice.cmd", "Restore-Voice.ps1", "maintenance-README.txt", "restore-voice-managed.ps1"].map(name => "windows/" + name)];
+  ...["voice-paths.ps1", "maintenance-processes.ps1", "maintenance-shortcuts.ps1", "install-maintenance.ps1", "restore-maintenance.ps1", "install-feature-preview.ps1", "Repair-Voice.cmd", "Repair-Voice.ps1", "Restore-Voice.cmd", "Restore-Voice.ps1", "maintenance-README.txt", "restore-voice-managed.ps1"].map(name => "windows/" + name)];
 const sha = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 function inside(root, file) { const relative = path.relative(root, file); return relative && !relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative); }
 function safeRelative(name) {
   if (!name || name.includes("\\") || path.posix.isAbsolute(name) || /^[A-Za-z]:/.test(name) || name.split("/").some(part => !part || part === "." || part === "..")) throw new Error("unsafe package manifest path");
-  if (name.split("/").some(part => ["node_modules", "models", "backups", "test-results", "__pycache__"].includes(part)) || /(?:^|\/)(?:config\.json|token|rewrite_api_key|credentials\.json)$/.test(name)) throw new Error("private data is not a maintenance package file");
+  if (name.split("/").some(part => ["node_modules", "models", "backups", "test-results", "__pycache__"].includes(part)) || /(?:^|\/)(?:config\.json|token|rewrite_api_key|stt_api_key|credentials\.json)$/.test(name)) throw new Error("private data is not a maintenance package file");
   return name;
 }
 function readRegular(root, name) {
@@ -72,18 +72,82 @@ function ensurePackage(sourceRoot, maintenanceRoot) {
     }
   }
 }
+function pruneCache(maintenanceRoot, options = {}) {
+  const maintenance = fs.realpathSync.native(maintenanceRoot);
+  const cache = path.join(maintenance, "cache");
+  if (!fs.existsSync(cache) || fs.lstatSync(cache).isSymbolicLink() || !fs.lstatSync(cache).isDirectory()) {
+    return { removed: [], kept: [] };
+  }
+  const cacheRoot = fs.realpathSync.native(cache);
+  const keepSet = new Set();
+  for (const item of options.keepPackageRoots || []) {
+    if (!item || !fs.existsSync(item)) continue;
+    const resolved = fs.realpathSync.native(item);
+    if (inside(cacheRoot, resolved)) keepSet.add(process.platform === "win32" ? resolved.toLowerCase() : resolved);
+  }
+  const keepPerVersion = Number.isInteger(options.keepPerVersion) && options.keepPerVersion >= 1 ? options.keepPerVersion : 1;
+  const activeVersion = typeof options.activeVersion === "string" && options.activeVersion ? options.activeVersion : null;
+  const dryRun = Boolean(options.dryRun);
+  const removed = [], kept = [];
+
+  for (const verEntry of fs.readdirSync(cacheRoot, { withFileTypes: true })) {
+    if (!verEntry.isDirectory() || verEntry.isSymbolicLink()) continue;
+    const verDir = path.join(cacheRoot, verEntry.name);
+    const verReal = fs.realpathSync.native(verDir);
+    if (!inside(cacheRoot, verReal)) continue;
+    if (verEntry.name.startsWith(".staging-")) {
+      if (!dryRun) fs.rmSync(verReal, { recursive: true, force: true });
+      removed.push(verReal);
+      continue;
+    }
+    const hashes = [];
+    for (const hashEntry of fs.readdirSync(verReal, { withFileTypes: true })) {
+      if (!hashEntry.isDirectory() || hashEntry.isSymbolicLink()) continue;
+      const hashReal = fs.realpathSync.native(path.join(verReal, hashEntry.name));
+      if (!inside(verReal, hashReal)) continue;
+      const key = process.platform === "win32" ? hashReal.toLowerCase() : hashReal;
+      const mtime = fs.statSync(hashReal).mtimeMs;
+      hashes.push({ hashReal, key, mtime, pinned: keepSet.has(key) });
+    }
+    hashes.sort((a, b) => b.mtime - a.mtime);
+    let retainedForVersion = 0;
+    for (const item of hashes) {
+      const keepThis = item.pinned || ((!activeVersion || verEntry.name === activeVersion) && retainedForVersion < keepPerVersion);
+      if (keepThis) {
+        kept.push(item.hashReal);
+        retainedForVersion += 1;
+      } else {
+        if (!dryRun) fs.rmSync(item.hashReal, { recursive: true, force: true });
+        removed.push(item.hashReal);
+      }
+    }
+    if (!dryRun && fs.existsSync(verReal) && fs.readdirSync(verReal).length === 0) {
+      fs.rmSync(verReal, { recursive: true, force: true });
+    }
+  }
+  return { removed, kept };
+}
 if (require.main === module) {
   try {
     const args = {};
     for (let i = 2; i < process.argv.length; i++) {
       const name = process.argv[i];
       if (Object.hasOwn(args, name)) throw new Error("duplicate cache package argument");
-      if (name === "--verify-only") { args[name] = true; continue; }
-      if (!["--source", "--maintenance-root"].includes(name) || !process.argv[i + 1]) throw new Error("invalid cache package arguments");
+      if (name === "--verify-only" || name === "--prune-cache" || name === "--dry-run") { args[name] = true; continue; }
+      if (!["--source", "--maintenance-root", "--keep", "--active-version"].includes(name) || !process.argv[i + 1]) throw new Error("invalid cache package arguments");
       args[name] = process.argv[++i];
     }
-    if (!args["--source"] || (!args["--verify-only"] && !args["--maintenance-root"])) throw new Error("source and maintenance root are required unless verifying only");
-    console.log(JSON.stringify(args["--verify-only"] ? verifyPackage(args["--source"]) : ensurePackage(args["--source"], args["--maintenance-root"])));
+    if (args["--prune-cache"]) {
+      if (!args["--maintenance-root"]) throw new Error("maintenance root is required for cache pruning");
+      console.log(JSON.stringify(pruneCache(args["--maintenance-root"], {
+        keepPackageRoots: args["--keep"] ? [args["--keep"]] : [],
+        activeVersion: args["--active-version"] || null,
+        dryRun: Boolean(args["--dry-run"]),
+      })));
+    } else {
+      if (!args["--source"] || (!args["--verify-only"] && !args["--maintenance-root"])) throw new Error("source and maintenance root are required unless verifying only");
+      console.log(JSON.stringify(args["--verify-only"] ? verifyPackage(args["--source"]) : ensurePackage(args["--source"], args["--maintenance-root"])));
+    }
   } catch (error) { console.error("[maintenance-package] " + error.message); process.exitCode = 1; }
 }
-module.exports = { REQUIRED_FILES, verifyPackage, ensurePackage };
+module.exports = { REQUIRED_FILES, verifyPackage, ensurePackage, pruneCache };

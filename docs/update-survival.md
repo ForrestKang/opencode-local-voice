@@ -17,18 +17,42 @@
 
 ```powershell
 $VoiceMaintenance = Join-Path $env:USERPROFILE '.config\opencode\voice-maintenance'
+# 1) 1 秒检查新版 OpenCode app.asar 的 5 个注入锚点是否兼容
+& (Join-Path $VoiceMaintenance 'Repair-Voice.cmd') -Compat
+# 2) 检查维护状态与文件完整性
 & (Join-Path $VoiceMaintenance 'Repair-Voice.cmd') -Check
+# 3) OpenCode 更新覆盖 app.asar 后，一键预检并热适配补丁
+& (Join-Path $VoiceMaintenance 'Repair-Voice.cmd') -Adapt
+# 4) 如需手动立即触发备份与缓存滚动瘦身（每次更新也会自动执行）
+& (Join-Path $VoiceMaintenance 'Repair-Voice.cmd') -Prune
 ```
 
-3. 检查无错误时，运行同一目录的修复入口，再查看设置和麦克风按钮：
+3. 也可直接运行维护目录的默认修复入口启动恢复，再查看设置和麦克风按钮：
 
 ```powershell
 & (Join-Path $VoiceMaintenance 'Repair-Voice.cmd')
 ```
 
+每次应用更新都会自动去重冗余 `app.asar` 副本并滚动修剪旧备份，只保留当前 OpenCode 版本的原版干净备份与最新 1 份回滚点，避免磁盘空间持续膨胀。
+
 这些命令使用安装时保存的维护配置。若维护目录不存在，请按 [安装指南](install.md#windows) 重新安装；若检查提示不兼容或文件不匹配，请保留错误并提交 Issue。
 
-直接运行 `OpenCode.exe` 或未经维护的第三方启动入口，可能绕过启动检查。更新器重建快捷方式后也可能需要重新应用插件。
+直接运行 `OpenCode.exe` 或未经维护的第三方启动入口，可能绕过启动检查。更新器重建快捷方式后也可能需要重新应用插件；可执行维护目录的 `Repair-Voice.cmd -Rebind` 仅重新接管快捷方式而不启动应用，或通过仓库 `.\windows\Update-Plugin.cmd -InstallAutoRepairTask` 注册按需的登录时快捷方式守护任务（移除参数为 `-RemoveAutoRepairTask`）。
+
+### 拉取并更新到最新插件
+
+保存工作并退出 OpenCode 后，在仓库根目录运行一键更新入口（会保留已有 `config.json`、词表和本地模型）：
+
+```powershell
+# git 仓库或本地解压目录原地增量更新（先验证可用 -DryRun）
+.\windows\Update-Plugin.cmd -DryRun
+.\windows\Update-Plugin.cmd
+
+# 从 GitHub 最新 Release 校验并拉取更新（或追加 -InstallAutoRepairTask 启用快捷方式守护）
+.\windows\Update-Plugin.cmd -FromGitHub
+```
+
+如果 `%USERPROFILE%\.config\opencode` 是迁移到其他盘符的 NTFS Junction，安装、修复与更新脚本会在入口自动解析其真实路径，同时保留内部目录链接防护。
 
 ### 点击更新时报错
 
@@ -56,4 +80,4 @@ bash linux/apply-oc-mic.sh --app /path/to/unpacked/OpenCode
 
 Web、TUI 和 CLI 使用应用包之外的本地服务。升级这些适配器时，更新源码和运行环境；Web Origin 或凭据改变后需要重新生成个人脚本。
 
-需要撤回桌面补丁时，使用 [恢复指南](recovery-v0.2.0.md)。
+需要撤回桌面补丁时，使用 [恢复指南](recovery.md)。

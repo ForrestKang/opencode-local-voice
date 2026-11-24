@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import http.client
 import io
 import json
 import math
 import os
 import secrets
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 import wave
 from pathlib import Path
@@ -39,27 +41,101 @@ def _apply_config_path(value: Optional[str]) -> None:
     os.environ["OPENCODE_VOICE_HOME"] = str(home.resolve())
 
 
+_CLI_CONN_LOCK = threading.Lock()
+_CLI_CONNS: dict[tuple[str, int], http.client.HTTPConnection] = {}
+
+
+def _get_cli_conn(host: str, port: int, timeout: float) -> tuple[http.client.HTTPConnection, bool]:
+    key = (host, port)
+    with _CLI_CONN_LOCK:
+        conn = _CLI_CONNS.pop(key, None)
+    if conn is not None and getattr(conn, "sock", None) is not None:
+        conn.timeout = timeout
+        try:
+            conn.sock.settimeout(timeout)
+            return conn, True
+        except OSError:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    return conn, False
+
+
+def _release_cli_conn(host: str, port: int, conn: http.client.HTTPConnection, will_close: bool) -> None:
+    if will_close or getattr(conn, "sock", None) is None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    with _CLI_CONN_LOCK:
+        previous = _CLI_CONNS.pop((host, port), None)
+        _CLI_CONNS[(host, port)] = conn
+    if previous is not None and previous is not conn:
+        try:
+            previous.close()
+        except Exception:
+            pass
+
+
 def _read_json_response(url: str, method: str = "GET", token: Optional[str] = None,
                         data: Optional[bytes] = None, headers: Optional[dict[str, str]] = None,
                         timeout: float = 5.0) -> tuple[int, dict[str, Any]]:
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     req_headers = dict(headers or {})
     if token is not None:
         req_headers["Authorization"] = "Bearer " + token
     if data is not None:
         req_headers.setdefault("Content-Type", "application/json")
-    request = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read(128 * 1024)
-            parsed = json.loads(raw.decode("utf-8")) if raw else {}
-            return response.status, parsed
-    except urllib.error.HTTPError as exc:
-        raw = exc.read(128 * 1024)
+    req_headers.setdefault("Connection", "keep-alive")
+    transient = (http.client.RemoteDisconnected, http.client.BadStatusLine,
+                 ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+    for attempt in (0, 1):
+        conn, reused = _get_cli_conn(host, port, timeout)
         try:
-            parsed = json.loads(raw.decode("utf-8")) if raw else {}
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            parsed = {}
-        return exc.code, parsed
+            if not reused:
+                conn.connect()
+                if conn.sock is not None:
+                    try:
+                        conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except OSError:
+                        pass
+            conn.request(method, path, body=data, headers=req_headers)
+            response = conn.getresponse()
+            max_bytes = 1024 * 1024
+            raw = response.read(max_bytes + 1)
+            status = response.status
+            oversized = len(raw) > max_bytes
+            _release_cli_conn(host, port, conn, oversized or getattr(response, "will_close", True))
+            if oversized:
+                raise RuntimeError("local voice service returned an oversized response")
+            try:
+                output = json.loads(raw.decode("utf-8")) if raw else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                output = {}
+            return status, output
+        except transient:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if reused and attempt == 0:
+                continue
+            raise
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+    raise RuntimeError("local HTTP request failed")
 
 
 def health_challenge(port: int, token: str, timeout: float = 1.0) -> bool:
@@ -82,9 +158,7 @@ def ensure_server(store: ConfigStore) -> None:
     try:
         health_challenge(config["port"], store.token)
         return
-    except urllib.error.URLError:
-        pass
-    except TimeoutError:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
         pass
     env = os.environ.copy()
     env["OPENCODE_VOICE_HOME"] = str(store.home)
@@ -105,9 +179,7 @@ def ensure_server(store: ConfigStore) -> None:
         try:
             health_challenge(config["port"], store.token, timeout=0.8)
             return
-        except urllib.error.URLError as exc:
-            last_connection_error = exc
-        except TimeoutError as exc:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             last_connection_error = exc
         time.sleep(0.2)
     detail = f": {last_connection_error}" if last_connection_error else ""
@@ -206,9 +278,13 @@ def _post_audio(port: int, token: str, wav_bytes: bytes, job_id: str) -> dict[st
     return response
 
 
-def _get_job(port: int, token: str, job_id: str) -> dict[str, Any]:
+def _get_job(port: int, token: str, job_id: str, wait: float = 0.0) -> dict[str, Any]:
     url = f"http://127.0.0.1:{port}/v1/jobs/{urllib.parse.quote(job_id, safe='-')}"
-    status, response = _read_json_response(url, token=token, timeout=5)
+    timeout = 5.0
+    if wait > 0:
+        url += f"?wait={wait:.3f}"
+        timeout = max(5.0, wait + 5.0)
+    status, response = _read_json_response(url, token=token, timeout=timeout)
     if status != 200:
         raise RuntimeError(response.get("error", f"voice service returned HTTP {status}"))
     return response
@@ -230,12 +306,14 @@ def _submit_warmup(port: int, token: str) -> str:
 def _wait_job(port: int, token: str, job_id: str, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
-        job = _get_job(port, token, job_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("recognition job timed out")
+        job = _get_job(port, token, job_id, wait=min(25.0, remaining))
         if job["state"] in ("done", "error", "cancelled"):
             return job
         if time.monotonic() >= deadline:
             raise TimeoutError("recognition job timed out")
-        time.sleep(0.25)
 
 
 def transcribe(wav_bytes: bytes, store: ConfigStore, timeout: float = 180.0,

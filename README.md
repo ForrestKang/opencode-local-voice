@@ -5,7 +5,7 @@
 [![CI](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml/badge.svg)](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[English](docs/README_en.md) · [安装指南](docs/install.md) · [设置指南](docs/configuration.md) · [更新记录 (V0.2.1)](CHANGELOG.md) · [V0.2.0 更新说明](docs/release-v0.2.0.md)
+[English](docs/README_en.md) · [安装指南](docs/install.md) · [设置指南](docs/configuration.md) · [更新记录 (V0.2.1)](CHANGELOG.md) · [恢复指南](docs/recovery.md)
 
 OpenCode Local Voice 为 OpenCode 提供语音输入。点击输入框旁的麦克风，说完后结束录音，识别结果就会写入当前草稿。你可以修改文字，再自行发送。
 
@@ -13,16 +13,16 @@ OpenCode Local Voice 为 OpenCode 提供语音输入。点击输入框旁的麦�
 
 ## 功能
 
-- **零下载轻量化默认**：默认安装不下载 Whisper 模型，也不安装 `pip` / PyTorch / Whisper 等重型依赖（仅创建极简标准库虚拟环境）。
+- **零下载轻量化默认 + 可选 0.8 MB Rust 单文件守护进程**：默认安装不下载 Whisper 模型，也不安装 `pip` / PyTorch 等重型依赖；另提供纯 Rust 零 Python 守护进程（`rust/oc-voice-daemon`，编译后约 0.8 MB），开箱支持云端 OpenAI STT 与离线 `whisper-cli`，并由桌面桥接自动探测切换。
 - **按平台适配语音识别**：
   - **macOS**：默认使用系统原生 **Apple Speech**（`SFSpeechRecognizer`，支持端侧识别）。
   - **Windows / Linux / 跨平台**：支持 **OpenAI 兼容语音识别接口**（Groq Whisper、SiliconFlow SenseVoice、OpenAI Whisper 或本机局域网 Whisper 服务）。
-  - **可选高精度本地模型**：需要完全离线或最高精度本地识别时，可随时按需安装 `faster-whisper` / Apple Silicon MLX。
+  - **可选高精度本地模型**：需要完全离线或最高精度本地识别时，可随时按需安装 `faster-whisper` / Apple Silicon MLX 或轻量 `whisper-cli`。
 - **原生设置**：集中管理识别模式、API 预设、麦克风、识别语言和文本处理选项。
 - **词表与纠错**：内置编程词表，支持自定义术语、纠错规则和 JSON 导入导出。
-- **文本整理**：可选中文或英文标点、空格处理、编程任务模板与自定义模板。
+- **中文标点与自动断句**：结合自然标点风格提示、停顿转逗号与中文长句自动断句（避开代码/URL/路径），同时支持编程任务模板与自定义模板。
 - **可选 AI 改写**：接入 OpenAI 兼容接口；默认使用本地整理，无需额外改写模型。
-- **更新与恢复**：Windows 提供受支持安装包的更新后恢复，以及带备份的应用补丁恢复。
+- **更新即时适配与自动瘦身**：Windows 提供 `Repair-Voice.cmd -Compat`（1 秒兼容预检）、`-Adapt`（OpenCode 更新后一键热适配）与自动滚动备份瘦身（自动去重并仅保留原版与最新回滚点）。
 
 ## 快速开始
 
@@ -78,7 +78,7 @@ bash linux/install.sh
 
 Tauri、商店包和未知桌面布局目前不支持应用补丁。macOS 补丁会对候选应用进行 ad-hoc 签名，可能影响系统信任与更新；安装前请阅读 [macOS 安装说明](docs/install.md#macos)。
 
-OpenCode 更新后语音入口消失时，按 [更新指南](docs/update-survival.md) 处理；需要恢复安装前状态时，使用 [恢复指南](docs/recovery-v0.2.0.md)。
+OpenCode 更新后语音入口消失时，按 [更新指南](docs/update-survival.md) 处理；需要恢复安装前状态时，使用 [恢复指南](docs/recovery.md)。
 
 ## 隐私
 

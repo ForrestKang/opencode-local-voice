@@ -144,6 +144,58 @@ class LocalTranscriptTests(unittest.TestCase):
         self.assertEqual(zh, "你好 世界 OpenCode 3.5。")
         en = voice_text.local_transform("hello，world, version 3.5.", self.config, "en")
         self.assertEqual(en, "hello world version 3.5.")
+        # Pure English transcript with a misdetected "zh" language tag must keep English punctuation.
+        self.config.update({"punctuation_mode": "auto", "space_mode": "preserve"})
+        pure_en = voice_text.local_transform("Please check Python API in OpenCode.", self.config, "zh")
+        self.assertEqual(pure_en, "Please check Python API in OpenCode.")
+
+    def test_chinese_auto_segmentation_and_smart_pause_commas(self):
+        # Smart mode turns long Chinese pause spaces into commas while still joining stray short spaces.
+        self.config.update({"punctuation_mode": "zh", "space_mode": "smart", "text_mode": "clean"})
+        paused = voice_text.local_transform(
+            "我记得设置里面有优化标点符号的选项 你帮我也优化一下 能不能清楚识别出来呢",
+            self.config,
+            "zh",
+        )
+        self.assertEqual(paused, "我记得设置里面有优化标点符号的选项，你帮我也优化一下，能不能清楚识别出来呢？")
+
+        # Continuous unpunctuated Chinese still breaks on clear clause connectors and adds ending punctuation.
+        continuous = voice_text.local_transform(
+            "请帮我检查一下 OpenCode 的 Python 接口如果有报错就先看日志然后再修改配置文件",
+            self.config,
+            "zh",
+        )
+        self.assertEqual(continuous, "请帮我检查一下 OpenCode 的 Python 接口，如果有报错就先看日志，然后再修改配置文件。")
+
+        # Partially punctuated long Chinese clauses also get connector breaks, and "[吗呢]。"/"，。" are normalized.
+        partial = voice_text.local_transform(
+            "请帮我检查一下OpenCode的Python接口。如果有报错就先看日志然后再修改配置文件，。",
+            self.config,
+            "zh",
+        )
+        self.assertEqual(partial, "请帮我检查一下 OpenCode 的 Python 接口。如果有报错就先看日志，然后再修改配置文件。")
+        question_fix = voice_text.local_transform(
+            "帮我把TypeScript配置和API接口检查一下。如果没有问题的话就可以直接运行测试好吗。",
+            self.config,
+            "zh",
+        )
+        self.assertEqual(question_fix, "帮我把 TypeScript 配置和 API 接口检查一下。如果没有问题的话就可以直接运行测试好吗？")
+
+        # comma-to-space explicitly removes commas, so auto-punctuation must not re-insert them.
+        self.config.update({"punctuation_mode": "zh", "space_mode": "comma-to-space", "text_mode": "clean"})
+        no_reinsert = voice_text.local_transform(
+            "请帮我检查一下接口如果有报错就先看日志然后再修改配置文件",
+            self.config,
+            "zh",
+        )
+        self.assertNotIn("，", no_reinsert)
+
+        # punctuation_mode=none and text_mode=original never insert punctuation.
+        self.config.update({"punctuation_mode": "none", "space_mode": "smart"})
+        raw_unpunct = "我之前试过就是没法自动断句能不能清楚识别出来呢"
+        self.assertEqual(voice_text.local_transform(raw_unpunct, self.config, "zh"), raw_unpunct)
+        self.config.update({"punctuation_mode": "zh", "text_mode": "original"})
+        self.assertEqual(voice_text.local_transform(raw_unpunct, self.config, "zh"), raw_unpunct)
 
     def test_preserve_and_smart_keep_english_word_gaps_and_measurements(self):
         sentence = "English words stay readable at 3.5 GHz and 100 ms."
@@ -196,6 +248,11 @@ class LocalTranscriptTests(unittest.TestCase):
         prompt, hotwords = voice_text.build_asr_hints(config)
         self.assertLessEqual(len(prompt), 1900)
         self.assertLessEqual(len(hotwords), voice_text.MAX_VOCABULARY_TOTAL_CHARS)
+        zh_prompt, zh_hotwords = voice_text.build_asr_hints({"language": "auto", "vocabulary_preset": "coding", "vocabulary": [], "initial_prompt": ""})
+        self.assertIn("，", zh_prompt)
+        self.assertIn("。", zh_prompt)
+        self.assertIn("OpenCode", zh_hotwords)
+        self.assertIn("CTranslate2", zh_hotwords)
 
     def test_optional_ai_success_uses_compatible_request_and_never_changes_local_mode(self):
         seen = {}
@@ -488,6 +545,335 @@ class OpenAiSttTests(unittest.TestCase):
                 s.server_close()
             for t in threads:
                 t.join(timeout=1)
+
+    def test_http_connection_pool_reuses_sockets_recovers_stale_and_prewarms(self):
+        from http.server import ThreadingHTTPServer
+
+        voice_text.close_http_pool()
+        seen_client_ports = []
+        close_after_reply = False
+
+        class KeepAliveHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+
+            def do_POST(self):
+                seen_client_ports.append(self.client_address[1])
+                size = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(size)
+                payload = json.dumps({"text": f"call {len(seen_client_ports)}"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                if close_after_reply:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                else:
+                    self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveHandler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+            cfg = {"stt_base_url": base, "stt_model": "whisper-1", "stt_timeout": 5}
+            wav_bytes = voice_text._silent_wav16k()
+
+            self.assertFalse(voice_text.prewarm_endpoint(base, timeout=1.0, allow_http=False))
+            self.assertTrue(voice_text.prewarm_endpoint(base, timeout=2.0, allow_http=True))
+
+            self.assertEqual(voice_text.transcribe_openai_compatible(wav_bytes, cfg), "call 1")
+            self.assertEqual(voice_text.transcribe_openai_compatible(wav_bytes, cfg), "call 2")
+            self.assertEqual(voice_text.transcribe_openai_compatible(wav_bytes, cfg), "call 3")
+            self.assertEqual(len(set(seen_client_ports)), 1, f"expected Keep-Alive socket reuse, got {seen_client_ports}")
+
+            # Force server close on reply, then verify pool cleanly reconnects on subsequent call.
+            close_after_reply = True
+            self.assertEqual(voice_text.transcribe_openai_compatible(wav_bytes, cfg), "call 4")
+            close_after_reply = False
+            self.assertEqual(voice_text.transcribe_openai_compatible(wav_bytes, cfg), "call 5")
+            self.assertEqual(len(seen_client_ports), 5)
+            self.assertEqual(len(set(seen_client_ports)), 2)
+        finally:
+            voice_text.close_http_pool()
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=2)
+
+    def test_fetch_remote_models_url_normalization_parsing_and_errors(self):
+        self.assertEqual(
+            voice_text.normalize_models_url("https://api.openai.com"),
+            "https://api.openai.com/v1/models",
+        )
+        self.assertEqual(
+            voice_text.normalize_models_url("https://api.groq.com/openai/v1"),
+            "https://api.groq.com/openai/v1/models",
+        )
+        self.assertEqual(
+            voice_text.normalize_models_url("https://api.example.com/v1/chat/completions", "rewrite_base_url"),
+            "https://api.example.com/v1/models",
+        )
+        self.assertEqual(
+            voice_text.normalize_models_url("https://api.example.com/v1/audio/transcriptions", "stt_base_url"),
+            "https://api.example.com/v1/models",
+        )
+        with self.assertRaises(voice_text.TextConfigError):
+            voice_text.normalize_models_url("http://insecure.example.com/v1", "stt_base_url")
+
+        seen = {}
+
+        class ModelsHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen["path"] = self.path
+                seen["auth"] = self.headers.get("Authorization")
+                if self.path.startswith("/auth-fail"):
+                    self.send_response(401)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if self.path.startswith("/not-found"):
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                payload = json.dumps({
+                    "data": [
+                        {"id": "Qwen/Qwen2.5-7B-Instruct"},
+                        {"id": "whisper-large-v3-turbo"},
+                        {"id": "whisper-large-v3-turbo"},
+                        {"id": "gpt-4o-mini"},
+                        {"id": ""},
+                    ]
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = HTTPServer(("127.0.0.1", 0), ModelsHandler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+            ok = voice_text.fetch_remote_models(base, api_key="sk-secret-abc", field="stt_base_url")
+            self.assertTrue(ok["ok"], ok)
+            self.assertEqual(ok["models"], ["whisper-large-v3-turbo", "Qwen/Qwen2.5-7B-Instruct", "gpt-4o-mini"])
+            self.assertEqual(seen["path"], "/v1/models")
+            self.assertEqual(seen["auth"], "Bearer sk-secret-abc")
+
+            ok_rw = voice_text.fetch_remote_models(base, api_key="sk-secret-abc", field="rewrite_base_url")
+            self.assertEqual(ok_rw["models"], ["Qwen/Qwen2.5-7B-Instruct", "whisper-large-v3-turbo", "gpt-4o-mini"])
+
+            sf_body, _ = voice_text._build_multipart_wav(b"RIFF", model="FunAudioLLM/SenseVoiceSmall", language="zh", prompt="OpenCode", minimal=True)
+            self.assertNotIn(b'name="response_format"', sf_body)
+            self.assertNotIn(b'name="language"', sf_body)
+            self.assertEqual(voice_text.validate_stt_api_key(" sk-abc\r\n "), "sk-abc")
+
+            unauth = voice_text.fetch_remote_models(
+                f"http://127.0.0.1:{srv.server_address[1]}/auth-fail/v1",
+                api_key="sk-secret-abc",
+            )
+            self.assertFalse(unauth["ok"])
+            self.assertIn("HTTP 401", unauth["message"])
+            self.assertNotIn("sk-secret-abc", unauth["message"])
+
+            missing = voice_text.fetch_remote_models(f"http://127.0.0.1:{srv.server_address[1]}/not-found/v1")
+            self.assertFalse(missing["ok"])
+            self.assertIn("/models", missing["message"])
+
+            # Custom opener raising urllib.error.HTTPError must be handled cleanly.
+            import io as _io
+            from urllib.error import HTTPError as _HTTPError
+
+            def failing_opener(_req, timeout=15):
+                raise _HTTPError(
+                    "https://api.example.com/v1/models", 401, "Unauthorized", {}, _io.BytesIO(b'{"error":{"message":"bad key"}}')
+                )
+
+            opener_err = voice_text.fetch_remote_models(
+                "https://api.example.com/v1", api_key="sk-secret-abc", opener=failing_opener
+            )
+            self.assertFalse(opener_err["ok"])
+            self.assertIn("HTTP 401", opener_err["message"])
+            self.assertIn("bad key", opener_err["message"])
+            self.assertNotIn("sk-secret-abc", opener_err["message"])
+        finally:
+            voice_text.close_http_pool()
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=2)
+
+    def test_process_transcript_forwards_recognized_language_to_rewrite_prompt(self):
+        seen_prompts = []
+
+        def opener(request, timeout=15):
+            payload = json.loads(request.data.decode("utf-8"))
+            seen_prompts.append(payload["messages"][0]["content"])
+            body = json.dumps({"choices": [{"message": {"content": "改写结果"}, "finish_reason": "stop"}]}).encode("utf-8")
+
+            class _Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self, _n=-1):
+                    return body
+
+            return _Resp()
+
+        cfg = voice_text.validate_text_config({
+            "text_mode": "ai",
+            "rewrite_base_url": "https://api.example.com/v1",
+            "rewrite_model": "test-model",
+        })
+        # Pure ASCII text with recognized_language="zh" must still receive the Chinese prompt.
+        local, final, warning = voice_text.process_transcript(
+            "API JSON HTTP", cfg, recognized_language="zh", api_key="sk-test", opener=opener
+        )
+        self.assertEqual((local, final, warning), ("API JSON HTTP", "改写结果", None))
+        self.assertEqual(seen_prompts, [voice_text.DEFAULT_REWRITE_PROMPT_ZH])
+
+    def test_http_pool_keeps_ssl_sockets_and_retries_on_ssl_eof(self):
+        import ssl
+
+        class FakeSSLSocket(ssl.SSLSocket):
+            def __init__(self, so_error=0):
+                self._so_error = so_error
+
+            def fileno(self):
+                return 42
+
+            def getsockopt(self, _level, _optname):
+                return self._so_error
+
+        class FakeConn:
+            def __init__(self, sock):
+                self.sock = sock
+                self.timeout = 5.0
+                self.closed = False
+                self.connected = False
+
+            def connect(self):
+                self.connected = True
+
+            def close(self):
+                self.closed = True
+
+        # Healthy SSLSocket must remain reusable (TLS 1.3 NewSessionTicket is readable).
+        self.assertTrue(voice_text._HttpConnectionPool._is_socket_healthy(FakeConn(FakeSSLSocket(0))))
+        self.assertFalse(voice_text._HttpConnectionPool._is_socket_healthy(FakeConn(FakeSSLSocket(104))))
+
+        # Stale SSL socket raising SSLEOFError on first attempt must retry cleanly on a fresh connection.
+        pool = voice_text._HttpConnectionPool()
+        calls = []
+
+        class FirstEofConn:
+            sock = object()
+
+            def request(self, *_args, **_kwargs):
+                calls.append("stale")
+                raise ssl.SSLEOFError("EOF occurred in violation of protocol")
+
+            def close(self):
+                calls.append("stale_close")
+
+        class FreshResp:
+            status = 200
+            will_close = True
+
+            def read(self, _limit):
+                return b'{"text":"recovered"}'
+
+        class FreshConn:
+            sock = None
+
+            def connect(self):
+                calls.append("fresh_connect")
+
+            def request(self, *_args, **_kwargs):
+                calls.append("fresh_request")
+
+            def getresponse(self):
+                return FreshResp()
+
+            def close(self):
+                calls.append("fresh_close")
+
+        seq = iter([(FirstEofConn(), True), (FreshConn(), False)])
+        pool._acquire = lambda *_args, **_kwargs: next(seq)  # type: ignore[method-assign]
+        status, body = pool.request_post("https://example.com/v1/audio/transcriptions", body=b"hi", headers={}, timeout=5, max_read_bytes=1024)
+        self.assertEqual((status, body), (200, b'{"text":"recovered"}'))
+        self.assertEqual(calls, ["stale", "stale_close", "fresh_connect", "fresh_request", "fresh_close"])
+
+    def test_http_pool_concurrent_stress_with_periodic_server_close(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        voice_text.close_http_pool()
+        counter_lock = threading.Lock()
+        served = [0]
+
+        class StressHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(size)
+                with counter_lock:
+                    served[0] += 1
+                    seq = served[0]
+                payload = json.dumps({"text": f"ok-{seq}"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                if seq % 4 == 0:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                else:
+                    self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.wfile.write(payload)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), StressHandler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+            cfg = {"stt_base_url": base, "stt_model": "whisper-1", "stt_timeout": 10}
+            wav_bytes = voice_text._silent_wav16k()
+
+            def call_one(_idx):
+                return voice_text.transcribe_openai_compatible(wav_bytes, cfg)
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                results = list(executor.map(call_one, range(30)))
+            self.assertEqual(len(results), 30)
+            self.assertTrue(all(item.startswith("ok-") for item in results))
+            self.assertEqual(served[0], 30)
+        finally:
+            voice_text.close_http_pool()
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

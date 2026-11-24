@@ -7,8 +7,8 @@ import re
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN = {".git", "node_modules", "test-results", "__pycache__", "models", "backups",
-             "config.json", "credentials.json", "token", "rewrite_api_key", "app.asar"}
+FORBIDDEN = {".git", "node_modules", "test-results", "__pycache__", "models", "backups", "target",
+             "config.json", "credentials.json", "token", "rewrite_api_key", "stt_api_key", "app.asar"}
 
 
 def verify_archive(filename, version, platform):

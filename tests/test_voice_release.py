@@ -30,6 +30,13 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn(prefix + "shared/feature-update.cjs", names)
                 self.assertIn(prefix + "windows/install-feature-preview.ps1", names)
                 self.assertIn(prefix + "windows/install.ps1", names)
+                self.assertIn(prefix + "windows/voice-paths.ps1", names)
+                self.assertIn(prefix + "windows/Update-Plugin.ps1", names)
+                self.assertIn(prefix + "docs/recovery.md", names)
+                self.assertNotIn(prefix + "windows/oc-mic.js", names)
+                self.assertNotIn(prefix + "windows/stt_server.py", names)
+                self.assertNotIn(prefix + "windows/install-ui-preview.cmd", names)
+                self.assertNotIn(prefix + "docs/release-v0.2.0.md", names)
                 self.assertNotIn(prefix + "macos/install.sh", names)
                 self.assertNotIn(prefix + "tests/bridge.test.cjs", names)
                 self.assertNotIn(prefix + "package.json", names)
@@ -85,6 +92,7 @@ class ReleaseTests(unittest.TestCase):
                 entries = {name: archive.read(name) for name in archive.namelist()}
             for extra, expected in ((prefix + "README.md", "hash mismatch"),
                                     (prefix + "shared/token", "private ZIP entry"),
+                                    (prefix + "shared/stt_api_key", "private ZIP entry"),
                                     (prefix + "../outside.md", "Unsafe")):
                 with self.subTest(extra=extra):
                     broken = Path(directory) / "broken.zip"

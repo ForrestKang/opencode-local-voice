@@ -21,6 +21,7 @@ import platform
 import queue
 import re
 import secrets
+import socket
 import stat
 import sys
 import sysconfig
@@ -51,7 +52,7 @@ VERSION = "0.2.1"
 PROTOCOL = 1
 SERVICE_NAME = "opencode-local-voice"
 DEFAULT_PORT = 47832
-MAX_HTTP_THREADS = 8
+MAX_HTTP_THREADS = 12
 MAX_PENDING_JOBS = 4
 MAX_RETAINED_JOBS = 64
 MAX_TOMBSTONES = 256
@@ -73,6 +74,21 @@ MODEL_FIELDS = {"backend", "device", "model_path", "cpu_threads", "stt_base_url"
 _CUDA_RUNTIME_HANDLES: list[Any] = []
 _CUDA_RUNTIME_PRELOADED: set[str] = set()
 _CUDA_RUNTIME_REGISTERED_DIRS: set[str] = set()
+
+
+def _clone_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Fast shallow-plus-container copy for flat voice configuration dicts."""
+    cloned = dict(config)
+    origins = cloned.get("allowed_origins")
+    if isinstance(origins, list):
+        cloned["allowed_origins"] = list(origins)
+    vocab = cloned.get("vocabulary")
+    if isinstance(vocab, list):
+        cloned["vocabulary"] = list(vocab)
+    replacements = cloned.get("replacements")
+    if isinstance(replacements, list):
+        cloned["replacements"] = [dict(item) if isinstance(item, dict) else item for item in replacements]
+    return cloned
 
 
 class ConfigError(ValueError):
@@ -132,15 +148,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("unknown configuration field(s): " + ", ".join(sorted(unknown)))
     result = _default_config()
     result.update(copy.deepcopy(config))
-    if result["backend"] not in ("auto", "apple-speech", "openai-api", "faster-whisper", "mlx"):
-        raise ConfigError("backend must be auto, apple-speech, openai-api, faster-whisper, or mlx")
+    if result["backend"] not in ("auto", "apple-speech", "openai-api", "faster-whisper", "mlx", "sherpa-onnx"):
+        raise ConfigError("backend must be auto, apple-speech, openai-api, faster-whisper, mlx, or sherpa-onnx")
     if result["device"] not in ("auto", "cuda", "cpu"):
         raise ConfigError("device must be auto, cuda, or cpu")
     if not isinstance(result["model_path"], str):
         raise ConfigError("model_path must be a string")
     cleaned_model_path = result["model_path"].strip()
-    if result["backend"] in ("faster-whisper", "mlx") and not cleaned_model_path:
-        raise ConfigError("model_path must be a non-empty local directory path for local Whisper/MLX")
+    if result["backend"] in ("faster-whisper", "mlx", "sherpa-onnx") and not cleaned_model_path:
+        raise ConfigError("model_path must be a non-empty local directory path for local Whisper/MLX/Sherpa")
     result["model_path"] = os.path.expanduser(cleaned_model_path) if cleaned_model_path else ""
     try:
         result.update(voice_text.validate_stt_config(result))
@@ -225,6 +241,8 @@ class ConfigStore:
         with _initialization_lock(self.home):
             self.token = self._read_or_create_token()
             self._config = self._read_or_initialize_config()
+            self._allowed_origins: frozenset[str] = frozenset(self._config["allowed_origins"])
+            self._secret_cache: dict[str, tuple[int, tuple[int, int, int], str]] = {}
 
     def _read_or_create_token(self) -> str:
         try:
@@ -345,23 +363,69 @@ class ConfigStore:
             except FileNotFoundError:
                 pass
 
+    @staticmethod
+    def _file_stat_sig(path: Any) -> Optional[tuple[int, int, int]]:
+        try:
+            st = Path(path).stat()
+            return (int(st.st_ino), int(st.st_mtime_ns), int(st.st_size))
+        except (FileNotFoundError, TypeError, OSError):
+            return None
+
     def get(self) -> dict[str, Any]:
         with self._lock:
-            return copy.deepcopy(self._config)
+            return _clone_config(self._config)
+
+    def origin_allowed(self, origin: str) -> bool:
+        with self._lock:
+            return origin in self._allowed_origins
+
+    def setting(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            value = self._config.get(key, default)
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, dict):
+                return dict(value)
+            return value
+
+    def _read_cached_secret(self, slot: str, store_obj: Any, validator: Callable[[str], str],
+                            error_message: str) -> str:
+        store_path = getattr(store_obj, "path", None)
+        sig = self._file_stat_sig(store_path) if store_path is not None else None
+        store_id = id(store_obj)
+        if sig is not None:
+            cached = self._secret_cache.get(slot)
+            if cached is not None and cached[0] == store_id and cached[1] == sig:
+                return cached[2]
+        try:
+            key = store_obj.read()
+            validated = validator(key)
+        except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
+            self._secret_cache.pop(slot, None)
+            raise ConfigError(error_message) from exc
+        if store_path is not None:
+            new_sig = self._file_stat_sig(store_path)
+            if new_sig is not None:
+                self._secret_cache[slot] = (store_id, new_sig, validated)
+            else:
+                self._secret_cache.pop(slot, None)
+        return validated
 
     def _read_rewrite_api_key(self) -> str:
-        try:
-            key = self.secret_store.read()
-            return voice_text.validate_rewrite_api_key(key)
-        except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
-            raise ConfigError("rewrite credential file is invalid") from exc
+        return self._read_cached_secret(
+            "rewrite",
+            self.secret_store,
+            voice_text.validate_rewrite_api_key,
+            "rewrite credential file is invalid",
+        )
 
     def _read_stt_api_key(self) -> str:
-        try:
-            key = self.stt_secret_store.read()
-            return voice_text.validate_stt_api_key(key)
-        except (voice_text.TextConfigError, voice_secrets.SecretStorageError) as exc:
-            raise ConfigError("STT credential file is invalid") from exc
+        return self._read_cached_secret(
+            "stt",
+            self.stt_secret_store,
+            voice_text.validate_stt_api_key,
+            "STT credential file is invalid",
+        )
 
     def get_rewrite_api_key(self) -> str:
         """Internal credential accessor. Never include this value in public JSON."""
@@ -375,18 +439,20 @@ class ConfigStore:
 
     def public(self) -> dict[str, Any]:
         with self._lock:
-            config = copy.deepcopy(self._config)
+            config = _clone_config(self._config)
             config["rewrite_key_configured"] = bool(self._read_rewrite_api_key())
             config["stt_key_configured"] = bool(self._read_stt_api_key())
             return config
 
     def _write_rewrite_api_key_atomic(self, key: str) -> None:
+        self._secret_cache.pop("rewrite", None)
         try:
             self.secret_store.write(key)
         except voice_secrets.SecretStorageError as exc:
             raise OSError("could not persist rewrite credential") from exc
 
     def _write_stt_api_key_atomic(self, key: str) -> None:
+        self._secret_cache.pop("stt", None)
         try:
             self.stt_secret_store.write(key)
         except voice_secrets.SecretStorageError as exc:
@@ -451,7 +517,8 @@ class ConfigStore:
                         raise OSError("could not safely roll back rewrite credential update") from rollback_exc
                 raise
             self._config = new_config
-            return copy.deepcopy(self._config), changed
+            self._allowed_origins = frozenset(new_config["allowed_origins"])
+            return _clone_config(self._config), changed
 
 
 def hmac_proof(token: str, challenge: str) -> str:
@@ -627,20 +694,95 @@ class FasterWhisperEngine:
             self.model = self._create("cpu")
             self.device = "cpu"
 
+    @staticmethod
+    def _segment_text_with_word_pauses(seg: Any) -> str:
+        text = str(getattr(seg, "text", "") or "")
+        words = getattr(seg, "words", None)
+        if not words or any(ch in text for ch in "，。！？；：,.!?;:"):
+            return text
+        punct = ",，。！？!?;；:：、….-—)]}》\"'"
+        pieces: list[str] = []
+        last_end: Optional[float] = None
+        cjk_since_break = 0
+        for item in words:
+            token = str(getattr(item, "word", "") or "")
+            if not token:
+                continue
+            start = getattr(item, "start", None)
+            end = getattr(item, "end", None)
+            if pieces and isinstance(last_end, (int, float)) and isinstance(start, (int, float)):
+                gap = start - last_end
+                prev = pieces[-1].rstrip()
+                cur = token.lstrip()
+                if prev and cur and prev[-1] not in punct and cur[0] not in punct:
+                    has_cjk = ("\u3400" <= prev[-1] <= "\u9fff") or ("\u3400" <= cur[0] <= "\u9fff")
+                    if has_cjk and cjk_since_break >= 3:
+                        if gap >= 0.85:
+                            tail = "".join(pieces)
+                            pieces.append("？" if voice_text._RE_ZH_QUESTION.search(tail) else "。")
+                            cjk_since_break = 0
+                        elif gap >= 0.35:
+                            pieces.append("，")
+                            cjk_since_break = 0
+                    elif not has_cjk and gap >= 0.85:
+                        pieces.append(". ")
+                    elif not has_cjk and gap >= 0.45:
+                        pieces.append(", ")
+            pieces.append(token)
+            cjk_since_break += sum("\u3400" <= ch <= "\u9fff" for ch in token)
+            if isinstance(end, (int, float)):
+                last_end = end
+        return "".join(pieces) or text
+
+    @staticmethod
+    def _join_segments(segments: Any) -> str:
+        pieces: list[str] = []
+        last_end: Optional[float] = None
+        for seg in segments:
+            text = FasterWhisperEngine._segment_text_with_word_pauses(seg)
+            if not text.strip():
+                continue
+            start = getattr(seg, "start", None)
+            end = getattr(seg, "end", None)
+            if pieces:
+                prev = pieces[-1].rstrip()
+                cur = text.lstrip()
+                punct = ",，。！？!?;；:：、….-—)]}》\"'"
+                if prev and cur and prev[-1] not in punct and cur[0] not in punct:
+                    has_cjk = ("\u3400" <= prev[-1] <= "\u9fff") or ("\u3400" <= cur[0] <= "\u9fff")
+                    gap = (
+                        (start - last_end)
+                        if isinstance(last_end, (int, float)) and isinstance(start, (int, float))
+                        else 0.0
+                    )
+                    if gap >= 0.75:
+                        if has_cjk:
+                            prev_clause = re.split(r"[。！？!?]", "".join(pieces))[-1]
+                            pieces.append("？" if voice_text._RE_ZH_QUESTION.search(prev_clause) else "。")
+                        else:
+                            pieces.append(". ")
+                    elif has_cjk or gap >= 0.15:
+                        pieces.append("，" if has_cjk else ", ")
+            pieces.append(text)
+            if isinstance(end, (int, float)):
+                last_end = end
+        return "".join(pieces).strip()
+
     def _transcribe_once(self, audio: Any) -> tuple[str, Optional[str]]:
         initial_prompt, hotwords = voice_text.build_asr_hints(self.config)
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "language": None if self.config["language"] == "auto" else self.config["language"],
             "beam_size": self.config["beam_size"],
             "vad_filter": True,
+            "vad_parameters": {"min_silence_duration_ms": 320, "speech_pad_ms": 180},
             "condition_on_previous_text": False,
-            "without_timestamps": True,
+            "without_timestamps": False,
             "initial_prompt": initial_prompt or None,
         }
         if hotwords:
             kwargs["hotwords"] = hotwords
         segments, info = self.model.transcribe(audio, **kwargs)
-        return "".join(segment.text for segment in segments).strip(), getattr(info, "language", None)
+        return self._join_segments(segments), getattr(info, "language", None)
 
     def transcribe(self, audio: Any) -> tuple[str, Optional[str]]:
         try:
@@ -693,8 +835,157 @@ class MlxWhisperEngine:
         initial_prompt, _hotwords = voice_text.build_asr_hints(self.config)
         if initial_prompt:
             kwargs["initial_prompt"] = initial_prompt
-        result = self.module.transcribe(audio, **kwargs)
+        result = self.module.transcribe(_trim_edges_silence(audio, 16000), **kwargs)
         return str(result.get("text", "")).strip(), result.get("language")
+
+
+def _first_existing(directory: Path, names: tuple[str, ...]) -> Optional[Path]:
+    for name in names:
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def detect_sherpa_model(model_dir: Path) -> Optional[tuple[str, dict[str, str]]]:
+    """Identify SenseVoice or Moonshine v1/v2 ONNX layouts inside a local model directory."""
+    if not model_dir.is_dir():
+        return None
+    tokens = model_dir / "tokens.txt"
+    if not tokens.is_file():
+        return None
+    enc_v2 = _first_existing(model_dir, ("encoder_model.int8.onnx", "encoder_model.onnx"))
+    dec_v2 = _first_existing(model_dir, ("decoder_model_merged.int8.onnx", "decoder_model_merged.onnx"))
+    if enc_v2 and dec_v2:
+        return ("moonshine-v2", {
+            "encoder": str(enc_v2),
+            "decoder": str(dec_v2),
+            "tokens": str(tokens),
+        })
+    prep = _first_existing(model_dir, ("preprocess.onnx",))
+    enc = _first_existing(model_dir, ("encode.int8.onnx", "encode.onnx", "encoder.int8.onnx", "encoder.onnx"))
+    uncached = _first_existing(model_dir, ("uncached_decode.int8.onnx", "uncached_decode.onnx",
+                                          "uncached_decoder.int8.onnx", "uncached_decoder.onnx"))
+    cached = _first_existing(model_dir, ("cached_decode.int8.onnx", "cached_decode.onnx",
+                                        "cached_decoder.int8.onnx", "cached_decoder.onnx"))
+    if prep and enc and uncached and cached:
+        return ("moonshine", {
+            "preprocessor": str(prep),
+            "encoder": str(enc),
+            "uncached_decoder": str(uncached),
+            "cached_decoder": str(cached),
+            "tokens": str(tokens),
+        })
+    sv_model = _first_existing(model_dir, ("model.int8.onnx", "model.onnx"))
+    if sv_model:
+        return ("sense-voice", {
+            "model": str(sv_model),
+            "tokens": str(tokens),
+        })
+    return None
+
+
+def _trim_edges_silence(audio: Any, sample_rate: int = 16000) -> Any:
+    """Trim leading and trailing digital silence (> -80 dB margin 0.3s) for non-VAD ONNX models."""
+    if not hasattr(audio, "dtype") or not hasattr(audio, "__len__") or len(audio) <= sample_rate:
+        return audio
+    try:
+        import numpy as np
+        active = np.flatnonzero(np.abs(audio) > 1e-4)
+        if active.size == 0:
+            return audio
+        pad = int(0.3 * sample_rate)
+        start = max(0, int(active[0]) - pad)
+        end = min(len(audio), int(active[-1]) + pad + 1)
+        if end - start < len(audio) - int(0.2 * sample_rate):
+            return audio[start:end]
+    except Exception:
+        return audio
+    return audio
+
+
+class SherpaOnnxEngine:
+    """Optional offline ONNX Runtime engine supporting SenseVoice INT8 and Moonshine v1/v2."""
+
+    _SENSEVOICE_LANGS = frozenset({"zh", "en", "yue", "ja", "ko"})
+
+    def __init__(self, config: dict[str, Any]):
+        model_path = Path(config["model_path"]).expanduser()
+        if not model_path.is_dir():
+            raise RuntimeError("local sherpa-onnx model directory is missing")
+        detected = detect_sherpa_model(model_path)
+        if detected is None:
+            raise RuntimeError(
+                "local sherpa-onnx directory must contain tokens.txt and SenseVoice or Moonshine ONNX weights"
+            )
+        import sherpa_onnx
+        self.config = config
+        self.model_path = str(model_path)
+        self.model_kind, self.model_files = detected
+        self.backend = "sherpa-onnx"
+        provider = "cuda" if config.get("device") == "cuda" else "cpu"
+        self.device = provider
+        threads = max(1, int(config.get("cpu_threads", 4)))
+        recognizer_cls = sherpa_onnx.OfflineRecognizer
+        try:
+            self.recognizer = self._create_recognizer(recognizer_cls, provider, threads)
+        except Exception:
+            if config.get("device") != "auto" or provider == "cpu":
+                raise
+            self.device = "cpu"
+            self.recognizer = self._create_recognizer(recognizer_cls, "cpu", threads)
+
+    def _create_recognizer(self, recognizer_cls: Any, provider: str, threads: int) -> Any:
+        if self.model_kind == "sense-voice":
+            raw_lang = str(self.config.get("language", "auto")).strip().casefold()
+            lang = raw_lang if raw_lang in self._SENSEVOICE_LANGS else ""
+            return recognizer_cls.from_sense_voice(
+                model=self.model_files["model"],
+                tokens=self.model_files["tokens"],
+                num_threads=threads,
+                decoding_method="greedy_search",
+                debug=False,
+                provider=provider,
+                language=lang,
+                use_itn=True,
+            )
+        if self.model_kind == "moonshine-v2":
+            if not hasattr(recognizer_cls, "from_moonshine_v2"):
+                raise RuntimeError(
+                    "installed sherpa-onnx does not support Moonshine v2 layout; upgrade sherpa-onnx or use SenseVoice/Moonshine v1"
+                )
+            return recognizer_cls.from_moonshine_v2(
+                encoder=self.model_files["encoder"],
+                decoder=self.model_files["decoder"],
+                tokens=self.model_files["tokens"],
+                num_threads=threads,
+                provider=provider,
+                debug=False,
+            )
+        return recognizer_cls.from_moonshine(
+            preprocessor=self.model_files["preprocessor"],
+            encoder=self.model_files["encoder"],
+            uncached_decoder=self.model_files["uncached_decoder"],
+            cached_decoder=self.model_files["cached_decoder"],
+            tokens=self.model_files["tokens"],
+            num_threads=threads,
+            decoding_method="greedy_search",
+            debug=False,
+            provider=provider,
+        )
+
+    def transcribe(self, audio: Any) -> tuple[str, Optional[str]]:
+        clipped = _trim_edges_silence(audio, 16000)
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(16000, clipped)
+        if hasattr(self.recognizer, "decode_stream"):
+            self.recognizer.decode_stream(stream)
+        else:
+            self.recognizer.decode(stream)
+        result = stream.result
+        text = str(getattr(result, "text", "") or "").strip()
+        raw_lang = str(getattr(result, "lang", "") or "").strip().strip("<|>") or None
+        return text, raw_lang
 
 
 import importlib.util
@@ -724,12 +1015,36 @@ def apple_speech_helper_info() -> Optional[tuple[str, Path]]:
     return None
 
 
+_CAPABILITY_CACHE_TTL = 5.0
+_CAPABILITY_CACHE_LOCK = threading.Lock()
+_CAPABILITY_CACHE: dict[str, tuple[float, tuple[str, ...], Any, bool]] = {}
+
+
+def _cached_module_installed(module_name: str) -> bool:
+    find_spec_fn = importlib.util.find_spec
+    now = time.monotonic()
+    sys_path_key = tuple(sys.path)
+    with _CAPABILITY_CACHE_LOCK:
+        cached = _CAPABILITY_CACHE.get(module_name)
+        if (cached is not None and now - cached[0] < _CAPABILITY_CACHE_TTL and
+                cached[1] == sys_path_key and cached[2] is find_spec_fn):
+            return cached[3]
+    installed = find_spec_fn(module_name) is not None
+    with _CAPABILITY_CACHE_LOCK:
+        _CAPABILITY_CACHE[module_name] = (time.monotonic(), sys_path_key, find_spec_fn, installed)
+    return installed
+
+
 def local_whisper_installed() -> bool:
-    return importlib.util.find_spec("faster_whisper") is not None
+    return _cached_module_installed("faster_whisper")
 
 
 def local_mlx_installed() -> bool:
-    return _is_apple_silicon() and importlib.util.find_spec("mlx_whisper") is not None
+    return _is_apple_silicon() and _cached_module_installed("mlx_whisper")
+
+
+def local_sherpa_installed() -> bool:
+    return _cached_module_installed("sherpa_onnx")
 
 
 def capabilities_snapshot() -> dict[str, Any]:
@@ -737,6 +1052,7 @@ def capabilities_snapshot() -> dict[str, Any]:
         "apple_speech": apple_speech_helper_info() is not None,
         "local_whisper": local_whisper_installed(),
         "mlx": local_mlx_installed(),
+        "sherpa_onnx": local_sherpa_installed(),
         "openai_api": True,
     }
 
@@ -753,10 +1069,13 @@ def resolve_backend(config: dict[str, Any]) -> str:
     if has_api:
         return "openai-api"
     if has_model:
+        model_dir = Path(config["model_path"]).expanduser()
+        if not (model_dir / "model.bin").is_file() and detect_sherpa_model(model_dir) is not None:
+            return "sherpa-onnx"
         if _is_apple_silicon() and config.get("device") == "auto" and local_mlx_installed():
             return "mlx"
         return "faster-whisper"
-    raise ConfigError("未配置语音识别：请在「设置 → 语音输入」填写兼容 STT 接口（免下载模型），或安装可选本地模型。")
+    raise ConfigError("尚未设置语音识别方式：请打开「设置 → 语音输入」，填好「在线识别服务」（接口和密钥）或「本机离线模型」（模型文件夹路径）后保存。")
 
 
 class AppleSpeechEngine:
@@ -825,7 +1144,9 @@ def create_engine(config: dict[str, Any]):
         return MlxWhisperEngine(config)
     if backend == "faster-whisper":
         return FasterWhisperEngine(config)
-    raise RuntimeError(f"backend {backend} runs in lightweight mode and has no Whisper worker engine")
+    if backend == "sherpa-onnx":
+        return SherpaOnnxEngine(config)
+    raise RuntimeError(f"backend {backend} runs in lightweight mode and has no local worker engine")
 
 
 def recognition_worker_main(config: dict[str, Any], in_queue: Any, out_queue: Any,
@@ -1029,7 +1350,7 @@ class Coordinator:
                  stt_api_key: str = ""):
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
-        self.config = copy.deepcopy(config)
+        self.config = _clone_config(config)
         self.rewrite_api_key = rewrite_api_key
         self.stt_api_key = stt_api_key
         self._custom_worker_factory = worker_factory is not None and worker_factory is not ProcessWorker
@@ -1052,6 +1373,7 @@ class Coordinator:
         self.last_error: Optional[str] = None
         self.last_error_code: Optional[str] = None
         self.last_warmup_id: Optional[str] = None
+        self._prewarm_inflight = False
         self._stopping = False
         self._thread = threading.Thread(target=self._run, name="voice-job-coordinator", daemon=True)
         self._thread.start()
@@ -1061,7 +1383,7 @@ class Coordinator:
         backend = cfg.get("backend", "auto")
         if backend in ("openai-api", "apple-speech"):
             return True, backend, None
-        if backend in ("faster-whisper", "mlx"):
+        if backend in ("faster-whisper", "mlx", "sherpa-onnx"):
             return False, backend, None
         try:
             resolved = resolve_backend(cfg)
@@ -1128,29 +1450,67 @@ class Coordinator:
             self._condition.notify_all()
             return job, True
 
+    @staticmethod
+    def _lightweight_prewarm_targets(cfg: dict[str, Any], resolved: Optional[str]) -> list[str]:
+        targets: list[str] = []
+        if resolved == "openai-api":
+            stt_url = str(cfg.get("stt_base_url", "")).strip()
+            if stt_url:
+                targets.append(stt_url)
+        if cfg.get("text_mode") == "ai":
+            rewrite_url = str(cfg.get("rewrite_base_url", "")).strip()
+            if rewrite_url:
+                targets.append(rewrite_url)
+        return targets
+
+    def _spawn_prewarm(self, targets: list[str]) -> None:
+        def run_prewarm() -> None:
+            try:
+                for target_url in targets:
+                    voice_text.prewarm_endpoint(target_url, timeout=3.0)
+            finally:
+                with self._lock:
+                    self._prewarm_inflight = False
+
+        threading.Thread(target=run_prewarm, name="voice-tls-prewarm", daemon=True).start()
+
     def enqueue_warmup(self) -> Job:
+        prewarm_targets: list[str] = []
+        result_job: Optional[Job] = None
         with self._condition:
             if self._stopping:
                 raise ServiceStoppingError("service is shutting down")
             self._prune_locked()
             is_lightweight, resolved, _ = self._uses_lightweight(self.config)
             if is_lightweight:
+                if not self._prewarm_inflight:
+                    candidates = self._lightweight_prewarm_targets(self.config, resolved)
+                    if any(url.lstrip().casefold().startswith("https://") for url in candidates):
+                        self._prewarm_inflight = True
+                        prewarm_targets = candidates
                 if self.last_warmup_id and self.last_warmup_id in self.jobs:
-                    return self.jobs[self.last_warmup_id]
-                if not self._make_room_locked():
-                    raise QueueLimitError("voice job retention limit is full")
-                job = Job("warmup-" + str(uuid.uuid4()), None, True)
-                job.state = "done"
-                job.timings = {"queue_seconds": 0.0, "load_seconds": 0.0, "inference_seconds": 0.0,
-                               "total_seconds": 0.0, "audio_seconds": 0.0}
-                job.updated = time.monotonic()
-                if resolved:
-                    self.backend = resolved
-                    self.device = resolved
-                    self.model_state = "ready"
-                self.jobs[job.id] = job
-                self.last_warmup_id = job.id
-                return job
+                    result_job = self.jobs[self.last_warmup_id]
+                else:
+                    if not self._make_room_locked():
+                        self._prewarm_inflight = False
+                        raise QueueLimitError("voice job retention limit is full")
+                    job = Job("warmup-" + str(uuid.uuid4()), None, True)
+                    job.state = "done"
+                    job.timings = {"queue_seconds": 0.0, "load_seconds": 0.0, "inference_seconds": 0.0,
+                                   "total_seconds": 0.0, "audio_seconds": 0.0}
+                    job.updated = time.monotonic()
+                    if resolved:
+                        self.backend = resolved
+                        self.device = resolved
+                        self.model_state = "ready"
+                    self.jobs[job.id] = job
+                    self.last_warmup_id = job.id
+                    result_job = job
+        if prewarm_targets:
+            self._spawn_prewarm(prewarm_targets)
+        if result_job is not None:
+            return result_job
+        with self._condition:
             for job in self.jobs.values():
                 if job.warmup and self._is_live(job):
                     return job
@@ -1193,27 +1553,49 @@ class Coordinator:
             self._condition.notify_all()
             return True
 
+    def _finish_stop_worker(self, worker: Optional[Any], *, terminate: bool = False) -> None:
+        if worker is None:
+            return
+        try:
+            worker.stop(terminate=terminate)
+        finally:
+            with self._condition:
+                self.worker_stopping = False
+                self._condition.notify_all()
+
     def update_config(self, config: dict[str, Any], changed: set[str],
                       rewrite_api_key: Optional[str] = None,
-                      stt_api_key: Optional[str] = None) -> None:
+                      stt_api_key: Optional[str] = None,
+                      *, _defer_stop: bool = False) -> Optional[Any]:
+        worker_to_stop = None
         with self._condition:
             if self.has_live_jobs():
                 raise RuntimeError("configuration cannot change while a job is active")
-            self.config = copy.deepcopy(config)
+            self.config = _clone_config(config)
             if rewrite_api_key is not None:
                 self.rewrite_api_key = rewrite_api_key
             if stt_api_key is not None:
                 self.stt_api_key = stt_api_key
             self.last_error = None
             self.last_error_code = None
-            if changed & MODEL_FIELDS:
+            # SherpaOnnxEngine bakes language into its SenseVoice recognizer at load time.
+            reload_worker = bool(changed & MODEL_FIELDS) or (
+                self.backend == "sherpa-onnx" and "language" in changed
+            )
+            if reload_worker:
                 if self.worker is not None:
-                    worker, self.worker = self.worker, None
+                    worker_to_stop, self.worker = self.worker, None
                     self.worker_generation += 1
-                    worker.stop()
+                    self.worker_stopping = True
+                self.last_warmup_id = None
                 self.model_state = "unloaded"
                 self.backend = None
                 self.device = None
+                self._condition.notify_all()
+        if _defer_stop:
+            return worker_to_stop
+        self._finish_stop_worker(worker_to_stop, terminate=False)
+        return None
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         worker_to_stop = None
@@ -1283,13 +1665,10 @@ class Coordinator:
             job.timings = dict(job.timings or {})
             job.timings["rewrite_seconds"] = 0.0
             job.timings["total_seconds"] = max(0.0, job.updated - (job.started or job.updated))
+            result = job.public()
             self._condition.notify_all()
-        if worker_to_stop is not None:
-            worker_to_stop.stop(terminate=True)
-            with self._condition:
-                self.worker_stopping = False
-                self._condition.notify_all()
-        return job.public()
+        self._finish_stop_worker(worker_to_stop, terminate=True)
+        return result
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -1309,15 +1688,26 @@ class Coordinator:
                 "last_error_code": self.last_error_code,
             }
 
-    def wait(self, job_id: str, timeout: Optional[float] = None) -> Optional[dict[str, Any]]:
+    def wait(self, job_id: str, timeout: Optional[float] = None,
+             after_state: Optional[str] = None) -> Optional[dict[str, Any]]:
         deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            result = self.get(job_id)
-            if result is None or result["state"] in ("done", "error", "cancelled"):
-                return result
-            if deadline is not None and time.monotonic() >= deadline:
-                return result
-            time.sleep(0.05)
+        with self._condition:
+            while True:
+                self._prune_locked()
+                job = self.jobs.get(job_id)
+                if job is None:
+                    return None
+                if job.state in ("done", "error", "cancelled") or (
+                    after_state is not None and job.state != after_state
+                ):
+                    return job.public()
+                if deadline is None:
+                    self._condition.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return job.public()
+                    self._condition.wait(timeout=remaining)
 
     def _fail_active_locked(self, error: str, code: str = "worker_unavailable") -> None:
         job = self.jobs.get(self.active_id or "")
@@ -1363,6 +1753,7 @@ class Coordinator:
                         self.backend = msg["backend"]
                     if msg.get("device"):
                         self.device = msg["device"]
+                    self._condition.notify_all()
                     return
                 if msg.get("type") == "result":
                     job.state = msg.get("state", "error")
@@ -1420,6 +1811,13 @@ class Coordinator:
             self.device = resolved_backend
             self._condition.notify_all()
         try:
+            audio_seconds = 0.0
+            if not task.get("warmup") and task.get("audio"):
+                try:
+                    with wave.open(io.BytesIO(task["audio"]), "rb") as wav:
+                        audio_seconds = wav.getnframes() / float(wav.getframerate() or 16000)
+                except (wave.Error, EOFError):
+                    audio_seconds = 0.0
             inf_started = time.monotonic()
             if task.get("warmup"):
                 raw_text = ""
@@ -1458,10 +1856,13 @@ class Coordinator:
             processing_warning = local_warning
             rewrite_seconds = 0.0
             timings: dict[str, float] = {
-                "queue_seconds": task.get("queue_seconds", 0.0),
+                "queue_seconds": max(0.0, float(task.get("queue_seconds", 0.0))),
                 "load_seconds": 0.0,
                 "inference_seconds": inf_seconds,
                 "local_seconds": local_seconds,
+                "rewrite_seconds": 0.0,
+                "total_seconds": time.monotonic() - started,
+                "audio_seconds": audio_seconds,
             }
             if not task.get("warmup") and task_config.get("text_mode") == "ai" and local_warning is None:
                 with self._condition:
@@ -1486,7 +1887,7 @@ class Coordinator:
                 )
                 rewrite_seconds = time.monotonic() - rewrite_started
             timings["rewrite_seconds"] = rewrite_seconds
-            timings["total_seconds"] = time.monotonic() - started + task.get("queue_seconds", 0.0)
+            timings["total_seconds"] = time.monotonic() - started
             with self._condition:
                 if self._stopping or generation != self._lightweight_generation or self.active_id != job_id:
                     return
@@ -1526,6 +1927,7 @@ class Coordinator:
             factory_generation = None
             lightweight_backend = None
             lightweight_gen = None
+            worker_to_stop = None
             with self._condition:
                 if self._stopping:
                     break
@@ -1548,14 +1950,14 @@ class Coordinator:
                             worker_to_stop, self.worker = self.worker, None
                             if worker_to_stop is not None:
                                 self.worker_generation += 1
-                                worker_to_stop.stop(terminate=False)
+                                self.worker_stopping = True
                             job.state = "loading"
                             job.updated = job.started
                             lightweight_gen = self._lightweight_generation
                             lightweight_backend = resolved
                             task = {"id": job_id, "warmup": job.warmup, "audio": job.audio,
                                     "queue_seconds": max(0.0, job.started - job.created),
-                                    "config": copy.deepcopy(self.config),
+                                    "config": _clone_config(self.config),
                                     "rewrite_api_key": self.rewrite_api_key,
                                     "stt_api_key": self.stt_api_key}
                             job.audio = None
@@ -1564,12 +1966,12 @@ class Coordinator:
                             job.updated = job.started
                             task = {"id": job_id, "warmup": job.warmup, "audio": job.audio,
                                     "queue_seconds": max(0.0, job.started - job.created),
-                                    "config": copy.deepcopy(self.config),
+                                    "config": _clone_config(self.config),
                                     "rewrite_api_key": self.rewrite_api_key}
                             job.audio = None
                             if self.worker is None:
                                 create_worker = True
-                                factory_config = copy.deepcopy(self.config)
+                                factory_config = _clone_config(self.config)
                                 factory_generation = self.worker_generation
                             else:
                                 worker = self.worker
@@ -1583,6 +1985,8 @@ class Coordinator:
                 if task is None and worker is None and not create_worker:
                     self._condition.wait(timeout=0.2)
                     continue
+            if worker_to_stop is not None:
+                self._finish_stop_worker(worker_to_stop, terminate=False)
             if lightweight_backend is not None and task is not None:
                 thread = threading.Thread(
                     target=self._run_lightweight_job,
@@ -1629,6 +2033,7 @@ class Coordinator:
                             self._fail_active_locked(f"could not submit recognition task: {exc}")
                             worker_to_stop, self.worker = self.worker, None
                             self.worker_generation += 1
+                            self._condition.notify_all()
                         else:
                             worker_to_stop = worker
                     if worker_to_stop:
@@ -1690,6 +2095,282 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         finally:
             self._thread_slots.release()
 
+    def shutdown_request(self, request):
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        # Drain queued unread bytes non-blockingly before closing so Windows Winsock
+        # does not emit TCP RST while the peer is still reading an early 4xx response.
+        try:
+            request.setblocking(False)
+            drained = 0
+            while drained < 65536:
+                chunk = request.recv(4096)
+                if not chunk:
+                    break
+                drained += len(chunk)
+        except OSError:
+            pass
+        self.close_request(request)
+
+
+RECOMMENDED_LOCAL_MODELS: tuple[dict[str, str], ...] = (
+    {
+        "id": "faster-whisper-large-v3-turbo",
+        "repo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+        "backend": "faster-whisper",
+        "label": "large-v3-turbo（独显推荐 · 识别最准）",
+        "size_hint": "约 1.6 GB",
+        "description": "中英文混说与技术术语最准，有 NVIDIA 显卡时速度极快",
+    },
+    {
+        "id": "faster-whisper-small",
+        "repo": "Systran/faster-whisper-small",
+        "backend": "faster-whisper",
+        "label": "small（极速轻量 · CPU / 核显推荐）",
+        "size_hint": "约 480 MB",
+        "description": "体积小下载快、占用内存低，无独立显卡也能流畅使用",
+    },
+    {
+        "id": "faster-whisper-medium",
+        "repo": "Systran/faster-whisper-medium",
+        "backend": "faster-whisper",
+        "label": "medium（均衡之选 · 多语种准确）",
+        "size_hint": "约 1.5 GB",
+        "description": "准确率与占用折中，适合中英日韩等多语种场景",
+    },
+)
+_RECOMMENDED_MODEL_BY_ID: dict[str, dict[str, str]] = {item["id"]: item for item in RECOMMENDED_LOCAL_MODELS}
+_NVIDIA_GPU_CACHE: Optional[bool] = None
+
+
+def _has_nvidia_gpu() -> bool:
+    global _NVIDIA_GPU_CACHE
+    if _NVIDIA_GPU_CACHE is not None:
+        return _NVIDIA_GPU_CACHE
+    detected = False
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        try:
+            run_kwargs: dict[str, Any] = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.DEVNULL,
+                "text": True,
+                "timeout": 1.5,
+                "check": False,
+            }
+            if os.name == "nt":
+                run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.run([nvidia_smi, "-L"], **run_kwargs)
+            detected = proc.returncode == 0 and "GPU " in (proc.stdout or "")
+        except Exception:
+            detected = False
+    _NVIDIA_GPU_CACHE = detected
+    return detected
+
+
+def _is_valid_whisper_model_dir(directory: Path) -> bool:
+    if not directory.is_dir():
+        return False
+    config_file = directory / "config.json"
+    if not config_file.is_file() or config_file.stat().st_size == 0:
+        return False
+    try:
+        parsed = json.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    model_bin = directory / "model.bin"
+    if not model_bin.is_file() or model_bin.stat().st_size <= 1024 * 1024:
+        return False
+    return any(
+        (directory / name).is_file() and (directory / name).stat().st_size > 0
+        for name in ("tokenizer.json", "vocabulary.json", "vocabulary.txt")
+    )
+
+
+def _hf_download_endpoints() -> tuple[str, ...]:
+    has_proxy = any(
+        os.environ.get(name, "").strip()
+        for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+    )
+    if has_proxy:
+        return ("https://huggingface.co", "https://hf-mirror.com")
+    return ("https://hf-mirror.com", "https://huggingface.co")
+
+
+class ModelDownloadManager:
+    """Manage recommended local model discovery, verified download, and activation."""
+
+    def __init__(self, store: ConfigStore, coordinator: Coordinator):
+        self.store = store
+        self.coordinator = coordinator
+        self._lock = threading.Lock()
+        self._state: dict[str, Any] = {
+            "state": "idle",
+            "id": "",
+            "message": "",
+            "endpoint": "",
+        }
+        self._thread: Optional[threading.Thread] = None
+
+    def models_root(self) -> Path:
+        return self.store.home / "models"
+
+    def _same_path(self, left: str, right: Path) -> bool:
+        if not left:
+            return False
+        try:
+            return os.path.normcase(str(Path(left).expanduser().resolve())) == os.path.normcase(str(right.resolve()))
+        except OSError:
+            return False
+
+    def _activate_path(self, target: Path) -> dict[str, Any]:
+        worker_to_stop = None
+        with self.coordinator._condition:
+            if self.coordinator.has_live_jobs():
+                raise RuntimeError("正在识别语音，请稍候再切换模型")
+            updated, changed = self.store.update({"model_path": str(target)})
+            if changed:
+                worker_to_stop = self.coordinator.update_config(
+                    updated, changed,
+                    self.store.get_rewrite_api_key(),
+                    self.store.get_stt_api_key(),
+                    _defer_stop=True,
+                )
+        self.coordinator._finish_stop_worker(worker_to_stop, terminate=False)
+        return self.store.public()
+
+    def catalog(self) -> dict[str, Any]:
+        root = self.models_root()
+        active_path = str(self.store.get().get("model_path", "") or "").strip()
+        has_gpu = _has_nvidia_gpu()
+        recommended_id = "faster-whisper-large-v3-turbo" if has_gpu else "faster-whisper-small"
+        items = []
+        for spec in RECOMMENDED_LOCAL_MODELS:
+            target = root / spec["id"]
+            installed = _is_valid_whisper_model_dir(target)
+            items.append({
+                **spec,
+                "path": str(target),
+                "installed": installed,
+                "active": installed and self._same_path(active_path, target),
+                "recommended": spec["id"] == recommended_id,
+            })
+        with self._lock:
+            download = dict(self._state)
+        return {
+            "models_dir": str(root),
+            "active_model_path": active_path,
+            "has_nvidia_gpu": has_gpu,
+            "recommended_id": recommended_id,
+            "can_download": _cached_module_installed("huggingface_hub") and local_whisper_installed(),
+            "models": items,
+            "download": download,
+        }
+
+    def is_downloading(self) -> bool:
+        with self._lock:
+            return self._state.get("state") == "downloading"
+
+    def start_download(self, model_id: str, *, activate: bool = True) -> tuple[int, dict[str, Any]]:
+        spec = _RECOMMENDED_MODEL_BY_ID.get(str(model_id or "").strip())
+        if spec is None:
+            raise ConfigError("不支持的推荐模型标识")
+        target = (self.models_root() / spec["id"]).resolve()
+        if _is_valid_whisper_model_dir(target):
+            config_public = self._activate_path(target) if activate else self.store.public()
+            with self._lock:
+                self._state = {
+                    "state": "done",
+                    "id": spec["id"],
+                    "message": "模型已就绪" + ("并已启用" if activate else ""),
+                    "endpoint": "",
+                }
+            return 200, {
+                "ok": True,
+                "installed": True,
+                "activated": bool(activate),
+                "path": str(target),
+                "config": config_public,
+                "catalog": self.catalog(),
+            }
+        if not (_cached_module_installed("huggingface_hub") and local_whisper_installed()):
+            if sys.platform == "win32":
+                install_hint = r"windows\Update-Plugin.cmd -WithLocalModel"
+            elif sys.platform == "darwin":
+                install_hint = "bash macos/install.sh --with-local-model"
+            else:
+                install_hint = "bash linux/install.sh --with-local-model"
+            raise RuntimeError(f"当前环境缺少离线模型依赖，请先运行 {install_hint}")
+        worker_to_start: Optional[threading.Thread] = None
+        with self._lock:
+            if self._state["state"] == "downloading":
+                if self._state["id"] != spec["id"]:
+                    raise RuntimeError("已有模型正在下载，请等待完成后再试")
+            else:
+                self._state = {
+                    "state": "downloading",
+                    "id": spec["id"],
+                    "message": f"正在下载 {spec['label']}，请保持网络畅通…",
+                    "endpoint": "",
+                }
+                worker_to_start = threading.Thread(
+                    target=self._run_download,
+                    args=(spec, target, bool(activate)),
+                    name="voice-model-download",
+                    daemon=True,
+                )
+                self._thread = worker_to_start
+        if worker_to_start is not None:
+            worker_to_start.start()
+        return 202, {"ok": True, "installed": False, "catalog": self.catalog()}
+
+    def _run_download(self, spec: dict[str, str], target: Path, activate: bool) -> None:
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for name, value in (
+                ("HF_HUB_DISABLE_XET", "1"),
+                ("HF_HUB_ENABLE_HF_TRANSFER", "0"),
+                ("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
+            ):
+                os.environ[name] = value
+            from huggingface_hub import snapshot_download
+            endpoints = _hf_download_endpoints()
+            last_error = ""
+            completed_endpoint = ""
+            for endpoint in endpoints:
+                try:
+                    os.environ["HF_ENDPOINT"] = endpoint
+                    snapshot_download(repo_id=spec["repo"], local_dir=str(target), endpoint=endpoint)
+                    if not _is_valid_whisper_model_dir(target):
+                        raise RuntimeError("模型文件校验未通过，关键权重缺失")
+                    completed_endpoint = endpoint
+                    break
+                except Exception as exc:
+                    last_error = str(exc)[:200]
+            if not completed_endpoint:
+                raise RuntimeError(last_error or "模型下载失败，请检查网络连接或代理设置")
+            if activate:
+                self._activate_path(target)
+            with self._lock:
+                self._state = {
+                    "state": "done",
+                    "id": spec["id"],
+                    "message": "模型下载并校验完成" + ("，已自动设为默认模型" if activate else ""),
+                    "endpoint": completed_endpoint,
+                }
+        except Exception as exc:
+            with self._lock:
+                self._state = {
+                    "state": "error",
+                    "id": spec["id"],
+                    "message": f"下载失败：{str(exc)[:180]}",
+                    "endpoint": "",
+                }
+
 
 class VoiceApp:
     def __init__(self, store: ConfigStore, coordinator: Optional[Coordinator] = None):
@@ -1702,6 +2383,7 @@ class VoiceApp:
         if coordinator is not None:
             coordinator.rewrite_api_key = store.get_rewrite_api_key()
             coordinator.stt_api_key = store.get_stt_api_key()
+        self.models = ModelDownloadManager(self.store, self.coordinator)
         self.last_access = time.monotonic()
         self._access_lock = threading.Lock()
         self._stopping = threading.Event()
@@ -1714,7 +2396,9 @@ class VoiceApp:
     def idle_expired(self) -> bool:
         with self._access_lock:
             last_access = self.last_access
-        return time.monotonic() - last_access >= self.store.get()["idle_seconds"] and not self.coordinator.has_live_jobs()
+        return (time.monotonic() - last_access >= self.store.setting("idle_seconds", 1800) and
+                not self.coordinator.has_live_jobs() and
+                not self.models.is_downloading())
 
 
 def _content_length(handler: BaseHTTPRequestHandler, maximum: int) -> int:
@@ -1749,7 +2433,52 @@ class Handler(BaseHTTPRequestHandler):
 
     def setup(self):
         super().setup()
+        self._requests_handled = 0
+        self._body_consumed = False
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         self.connection.settimeout(10.0)
+
+    def handle_one_request(self):
+        if self._requests_handled > 0:
+            self.connection.settimeout(3.0)
+        try:
+            super().handle_one_request()
+        except (TimeoutError, socket.timeout):
+            if self._requests_handled > 0:
+                self.close_connection = True
+                return
+            raise
+
+    def parse_request(self):
+        ok = super().parse_request()
+        self._requests_handled += 1
+        self._body_consumed = False
+        try:
+            self.connection.settimeout(10.0)
+        except OSError:
+            pass
+        return ok
+
+    def _drain_unread_small_body(self) -> None:
+        if self._body_consumed or not getattr(self, "headers", None):
+            return
+        if self.headers.get("Expect", "").strip().lower() == "100-continue":
+            return
+        raw_cl = self.headers.get("Content-Length", "").strip()
+        if not raw_cl.isdigit():
+            return
+        size = int(raw_cl)
+        if not (0 < size <= 8192):
+            return
+        self._body_consumed = True
+        try:
+            self.connection.settimeout(0.03)
+            self.rfile.read(size)
+        except OSError:
+            pass
 
     def _send_json(self, code: int, obj: dict[str, Any], extra_headers: Optional[dict[str, str]] = None):
         if "error" in obj and "code" not in obj:
@@ -1758,12 +2487,19 @@ class Handler(BaseHTTPRequestHandler):
                            404: "not_found", 409: "conflict", 413: "too_large",
                            429: "queue_full", 500: "internal_error", 504: "timeout"}.get(code, "request_failed")
         body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self.close_connection = True
+        if code >= 400 or self.app.coordinator._stopping:
+            if code >= 400:
+                self._drain_unread_small_body()
+            self.close_connection = True
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        else:
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Keep-Alive", "timeout=3")
         self._cors_headers()
         if extra_headers:
             for key, value in extra_headers.items():
@@ -1775,10 +2511,15 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _send_empty(self, code: int):
-        self.close_connection = True
+        if code >= 400 or self.app.coordinator._stopping:
+            self.close_connection = True
         self.send_response(code)
         self.send_header("Content-Length", "0")
-        self.send_header("Connection", "close")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        else:
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Keep-Alive", "timeout=3")
         self._cors_headers()
         self.end_headers()
 
@@ -1794,7 +2535,7 @@ class Handler(BaseHTTPRequestHandler):
             normalized = _validate_origin(origin)
         except ConfigError:
             return False
-        return normalized in self.app.store.get()["allowed_origins"]
+        return self.app.store.origin_allowed(normalized)
 
     def _check_origin(self) -> bool:
         origin = self.headers.get("Origin")
@@ -1816,6 +2557,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any]:
         size = _content_length(self, MAX_JSON_BYTES)
+        self._body_consumed = True
         try:
             result = json.loads(self.rfile.read(size).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1914,12 +2656,14 @@ class Handler(BaseHTTPRequestHandler):
         return result
 
     def _read_audio(self) -> bytes:
-        max_audio = self.app.store.get()["max_seconds"] * 16000 * 2 + 65536
+        max_seconds = self.app.store.setting("max_seconds")
+        max_audio = max_seconds * 16000 * 2 + 65536
         size = _content_length(self, max_audio)
+        self._body_consumed = True
         data = self.rfile.read(size)
         if len(data) != size:
             raise ValueError("request body ended before Content-Length")
-        validate_wav16k(data, self.app.store.get()["max_seconds"])
+        validate_wav16k(data, max_seconds)
         return data
 
     def _request_gate(self, require_auth: bool = True) -> bool:
@@ -1955,6 +2699,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "origin is not allowed"})
             return
         self.app.touch()
+        self.close_connection = True
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
@@ -1983,9 +2728,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, self.app.store.public())
         elif parsed.path == "/v1/status":
             self._send_json(200, self.app.coordinator.status())
+        elif parsed.path == "/v1/models":
+            self._send_json(200, self.app.models.catalog())
         elif parsed.path.startswith("/v1/jobs/"):
             job_id = parsed.path[len("/v1/jobs/"):]
-            result = self.app.coordinator.get(job_id)
+            wait_seconds = 0.0
+            after_state: Optional[str] = None
+            if parsed.query:
+                params = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+                raw_wait = params.get("wait", [None])[0]
+                if raw_wait is not None:
+                    try:
+                        parsed_wait = float(raw_wait)
+                    except ValueError:
+                        self._send_json(400, {"error": "invalid wait parameter"})
+                        return
+                    if not (0.0 <= parsed_wait <= 25.0):
+                        self._send_json(400, {"error": "wait must be between 0 and 25 seconds"})
+                        return
+                    wait_seconds = parsed_wait
+                raw_after = params.get("after_state", [None])[0]
+                if raw_after is not None:
+                    if raw_after not in ("queued", "loading", "transcribing", "rewriting"):
+                        self._send_json(400, {"error": "invalid after_state parameter"})
+                        return
+                    after_state = raw_after
+            result = (
+                self.app.coordinator.wait(job_id, timeout=wait_seconds, after_state=after_state)
+                if wait_seconds > 0.0
+                else self.app.coordinator.get(job_id)
+            )
             self._send_json(200 if result else 404, result or {"error": "job not found"})
         else:
             self._send_json(404, {"error": "not found"})
@@ -2003,6 +2775,7 @@ class Handler(BaseHTTPRequestHandler):
             # Job enqueue and config commit share the coordinator condition:
             # no POST can become live between the idle check and disk commit.
             # The lock order is coordinator condition -> ConfigStore lock.
+            worker_to_stop = None
             with self.app.coordinator._condition:
                 current = self.app.store.get()
                 public_patch = {key: value for key, value in patch.items()
@@ -2033,9 +2806,13 @@ class Handler(BaseHTTPRequestHandler):
                 # in-memory copy. Runtime state remains untouched if that fails.
                 updated, changed = self.app.store.update(patch)
                 if changed:
-                    self.app.coordinator.update_config(updated, changed,
-                                                       self.app.store.get_rewrite_api_key(),
-                                                       self.app.store.get_stt_api_key())
+                    worker_to_stop = self.app.coordinator.update_config(
+                        updated, changed,
+                        self.app.store.get_rewrite_api_key(),
+                        self.app.store.get_stt_api_key(),
+                        _defer_stop=True,
+                    )
+            self.app.coordinator._finish_stop_worker(worker_to_stop, terminate=False)
             self._send_json(200, self.app.store.public())
         except OverflowError as exc:
             self._send_json(413, {"error": str(exc)})
@@ -2117,6 +2894,53 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 self.app._preview_slots.release()
             return
+        if path in ("/v1/stt/models", "/v1/rewrite/models"):
+            if not self.app._preview_slots.acquire(blocking=False):
+                self._send_json(429, {"ok": False, "models": [], "message": "请求过于频繁，请稍后重试。",
+                                      "code": "preview_busy"})
+                return
+            try:
+                body = self._read_json()
+                if path == "/v1/stt/models":
+                    config, api_key = self._preview_stt_config_and_key(body)
+                    url = config.get("stt_base_url", "")
+                    timeout = config.get("stt_timeout", 30)
+                    field = "stt_base_url"
+                else:
+                    config, api_key = self._preview_config_and_key(body, fixed_test=True)
+                    url = config.get("rewrite_base_url", "")
+                    timeout = config.get("rewrite_timeout", 15)
+                    field = "rewrite_base_url"
+                result = voice_text.fetch_remote_models(url, api_key=api_key, timeout=timeout, field=field)
+                self._send_json(200, result)
+            except OverflowError:
+                self._send_json(413, {"ok": False, "models": [], "message": "获取模型请求过大。"})
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "models": [], "message": str(exc)[:200] or "接口配置无效。"})
+            finally:
+                self.app._preview_slots.release()
+            return
+        if path == "/v1/models/download":
+            try:
+                body = self._read_json()
+                unknown = set(body) - {"id", "activate"}
+                if unknown:
+                    raise ConfigError("request contains an unknown field")
+                model_id = body.get("id")
+                if not isinstance(model_id, str) or not model_id.strip():
+                    raise ValueError("model id is required")
+                activate = body.get("activate", True)
+                if not isinstance(activate, bool):
+                    raise ValueError("activate must be a boolean")
+                code, payload = self.app.models.start_download(model_id, activate=activate)
+                self._send_json(code, payload)
+            except OverflowError as exc:
+                self._send_json(413, {"error": str(exc)})
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+            except RuntimeError as exc:
+                self._send_json(409, {"error": str(exc)})
+            return
         if path.startswith("/v1/jobs/") and path.endswith("/use-local"):
             job_id = path[len("/v1/jobs/"):-len("/use-local")].rstrip("/")
             try:
@@ -2173,7 +2997,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = str(parsed_id)
             job, created = self.app.coordinator.enqueue(job_id, audio)
             if path == "/inference":
-                result = self.app.coordinator.wait(job.id, timeout=self.app.store.get()["max_seconds"] * 10 + 120)
+                result = self.app.coordinator.wait(job.id, timeout=self.app.store.setting("max_seconds") * 10 + 120)
                 if result and result["state"] == "done":
                     response = {"text": result.get("text", ""), "raw_text": result.get("raw_text", ""),
                                 "local_text": result.get("local_text", ""), "timings": result.get("timings")}
@@ -2231,7 +3055,7 @@ def create_server(host: str = "127.0.0.1", port: Optional[int] = None,
         raise ValueError("OpenCode Local Voice must bind to 127.0.0.1")
     store = store or ConfigStore()
     config = store.get()
-    app = VoiceApp(store, coordinator or Coordinator(config, rewrite_api_key=store.get_rewrite_api_key()))
+    app = VoiceApp(store, coordinator)
     return BoundedHTTPServer((host, config["port"] if port is None else port), Handler, app, max_threads=max_threads)
 
 
@@ -2254,6 +3078,7 @@ def serve(store: Optional[ConfigStore] = None) -> None:
         stop.set()
         server.server_close()
         server.app.coordinator.close()
+        voice_text.close_http_pool()
 
 
 def main(argv: Optional[list[str]] = None) -> int:

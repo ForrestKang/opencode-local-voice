@@ -157,7 +157,15 @@ function Test-ExistingDeployment([string]$ActivePath, [string]$LauncherPath, [st
 $PackageRoot = Full $PackageRoot; $AppPath = Full $AppPath; $VoiceHome = Full $VoiceHome; $RuntimePath = Full $RuntimePath
 $BackupRoot = Full $BackupRoot; $MaintenanceRoot = Full $MaintenanceRoot; $NodePath = Full $NodePath; $PythonPath = Full $PythonPath
 if (-not $FixtureRoot) {
-  $nativeMaintenance = Join-Path $env:USERPROFILE '.config\opencode\voice-maintenance'
+  . (Join-Path $PSScriptRoot "voice-paths.ps1")
+  $logicalBase = Full (Join-Path $env:USERPROFILE '.config\opencode')
+  $realBase = Resolve-OpencodeBase $logicalBase -NodePath $NodePath -Strict
+  $VoiceHome = Resolve-OpencodePrefix $VoiceHome $logicalBase $realBase
+  $RuntimePath = Resolve-OpencodePrefix $RuntimePath $logicalBase $realBase
+  $BackupRoot = Resolve-OpencodePrefix $BackupRoot $logicalBase $realBase
+  $MaintenanceRoot = Resolve-OpencodePrefix $MaintenanceRoot $logicalBase $realBase
+  $PythonPath = Resolve-OpencodePrefix $PythonPath $logicalBase $realBase
+  $nativeMaintenance = Join-Path $realBase 'voice-maintenance'
   if (-not (Same $MaintenanceRoot $nativeMaintenance)) { Fail 'native updater requires the per-user voice-maintenance directory' }
   if (-not (Same $BackupRoot (Join-Path $MaintenanceRoot 'backups\0.2.1'))) { Fail 'native recovery requires voice-maintenance/backups/0.2.1' }
 }
@@ -265,6 +273,25 @@ try {
   }
   $transactionReceipt.deployed = $deployed
   Write-JsonAtomic $receiptFile $transactionReceipt
+  # Best-effort rolling cleanup: keep active cache snapshot and recent maintenance transactions.
+  try {
+    $cacheTool = Join-Path $stablePackageRoot "shared\maintenance-package.cjs"
+    if (Test-Path -LiteralPath $cacheTool -PathType Leaf) {
+      & $NodePath $cacheTool --prune-cache --maintenance-root $MaintenanceRoot --keep $stablePackageRoot --active-version "0.2.1" | Out-Null
+    }
+    $txRoot = Join-Path $MaintenanceRoot "transactions"
+    if (Test-Path -LiteralPath $txRoot -PathType Container) {
+      $txDirs = @(Get-ChildItem -LiteralPath $txRoot -Directory | Where-Object { $_.Name -like "0.2.1-*" } | Sort-Object LastWriteTimeUtc -Descending)
+      $keptCount = 0
+      foreach ($dir in $txDirs) {
+        if ((Same $dir.FullName $transaction) -or $keptCount -lt 5) {
+          $keptCount += 1
+        } else {
+          Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+      }
+    }
+  } catch {}
   [ordered]@{ state = "applied"; transaction = $transaction; active = $activePath; shortcutReceipt = $receiptPath; packageRoot = $stablePackageRoot; packageManifestSha256 = [string]$package.manifestSha256 } | ConvertTo-Json -Depth 12
 } catch {
   $failure = $_.Exception.Message

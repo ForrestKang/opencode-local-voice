@@ -12,6 +12,8 @@ function fixture(options = {}) {
     assert.equal(request.headers.Authorization, "Bearer " + token);
     if (url.pathname === "/v1/text") { const body = JSON.parse(request.body); return Response.json({ text: "preview", raw_text: body.text, local_text: "local", processing_warning: null }); }
     if (url.pathname === "/v1/rewrite/test") return Response.json({ ok: true, message: "connected" });
+    if (url.pathname === "/v1/models" && request.method === "GET") return Response.json({ recommended_id: "faster-whisper-small", models: [{ id: "faster-whisper-small", installed: false, active: false }], download: { state: "idle", id: "", message: "" } });
+    if (url.pathname === "/v1/models/download" && request.method === "POST") { const body = JSON.parse(request.body); return Response.json({ ok: true, installed: false, catalog: { download: { state: "downloading", id: body.id } } }, { status: 202 }); }
     if (url.pathname.endsWith("/use-local")) return Response.json({ id: url.pathname.split("/")[3], state: "done", text: "local" });
     if (request.method === "POST") {
       const id = request.headers["X-Job-Id"];
@@ -68,4 +70,12 @@ test("Web adapter blocks insecure contexts and empty audio", async () => {
   await assert.rejects(f.api.getConfig(), e => e.code === "SECURE_CONTEXT_REQUIRED");
   await assert.rejects(f.api.transcribe(new Uint8Array(0), "audio/wav", crypto.randomUUID()), e => e.code === "INVALID_AUDIO");
   assert.equal(f.events.length, 0);
+});
+test("Web adapter exposes local model catalog and download routes", async () => {
+  const f = fixture();
+  const catalog = await f.api.listModels();
+  assert.equal(catalog.recommended_id, "faster-whisper-small");
+  const dl = await f.api.downloadModel("faster-whisper-small", true);
+  assert.equal(dl.ok, true);
+  assert.deepEqual(JSON.parse(f.events.find(e => e.url.pathname === "/v1/models/download").body), { id: "faster-whisper-small", activate: true });
 });

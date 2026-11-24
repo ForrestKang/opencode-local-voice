@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE_FILES = ("README.md", "LICENSE", "VERSION", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md",
               "package.json", "package-lock.json", "tsconfig.json", ".gitignore", ".gitattributes")
 PUBLIC_DOCS = ("README_en.md", "install.md", "configuration.md", "update-survival.md",
-               "recovery-v0.2.0.md", "release-v0.2.0.md")
-COMMON_DIRS = ("shared", "extras", "tools", "tests", ".github")
-SUFFIXES = {".py", ".pyw", ".js", ".cjs", ".ts", ".swift", ".json", ".md", ".txt", ".sh", ".ps1", ".cmd", ".yml", ".png"}
+               "recovery.md")
+COMMON_DIRS = ("shared", "extras", "tools", "tests", "rust", ".github")
+SUFFIXES = {".py", ".pyw", ".js", ".cjs", ".ts", ".swift", ".rs", ".toml", ".lock", ".json", ".md", ".txt", ".sh", ".ps1", ".cmd", ".yml", ".png"}
 PLATFORMS = ("source", "windows", "macos", "linux")
 
 
@@ -32,8 +32,8 @@ def release_files(platform="source"):
             if platform != "source" and name == "tools" and path.name != "make-web-script.py":
                 continue
             if (path.is_file() and not path.is_symlink() and path.suffix in SUFFIXES
-                    and not {"__pycache__", "models", "backups", "node_modules", "test-results"}.intersection(path.parts)
-                    and path.name not in {"config.json", "token", "credentials.json"}
+                    and not {"__pycache__", "models", "backups", "node_modules", "test-results", "target"}.intersection(path.parts)
+                    and path.name not in {"config.json", "token", "credentials.json", "rewrite_api_key", "stt_api_key"}
                     and not path.name.endswith(".personal.user.js")):
                 files.add(path)
     return sorted(files, key=lambda path: path.relative_to(ROOT).as_posix())

@@ -222,3 +222,27 @@ test("an EACCES-style known spawn error may be followed by a second tracked fall
   const pidFile = JSON.parse(fs.readFileSync(path.join(token.requestDirectory, "installer-pids.json"), "utf8"));
   assert.deepEqual(pidFile.pids.map(item => item.pid), [8456]);
 });
+
+test("prepare canonicalizes a linked .config/opencode directory before passing configPath to update-recovery", async t => {
+  const f = fixture(t);
+  const userHome = path.join(f.root, "user-home");
+  const realOpencode = path.join(f.root, "real-opencode");
+  const realMaintenance = path.join(realOpencode, "voice-maintenance");
+  fs.mkdirSync(path.join(userHome, ".config"), { recursive: true });
+  fs.mkdirSync(realMaintenance, { recursive: true });
+  const realConfig = path.join(realMaintenance, "active.json");
+  fs.writeFileSync(realConfig, JSON.stringify({ ...f.active, maintenanceRoot: realMaintenance, backupRoot: path.join(realMaintenance, "backups", "0.2.1"), shortcutReceipt: path.join(realMaintenance, "shortcut-receipt.json") }));
+  const linkedOpencode = path.join(userHome, ".config", "opencode");
+  try {
+    fs.symlinkSync(realOpencode, linkedOpencode, process.platform === "win32" ? "junction" : "dir");
+  } catch (err) {
+    return t.skip("directory links unavailable: " + err.message);
+  }
+  const helper = spawnFixture(f);
+  const electron = { app: { getPath: () => userHome } };
+  const token = await bridge.prepare("1.18.34", { installerPath: f.installerPath }, electron, { spawn: helper.spawn });
+  const helperCall = helper.calls.find(call => call.args.includes("--mode"));
+  const passedConfig = helperCall.args[helperCall.args.indexOf("--config") + 1];
+  assert.equal(passedConfig.toLowerCase(), fs.realpathSync.native(realConfig).toLowerCase());
+  assert.equal(bridge.cancel(token), true);
+});

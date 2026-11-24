@@ -179,6 +179,10 @@ async function main() {
         window.calls = { saves: [], saveKeyStates: [], reads: 0, warmups: 0, permissions: 0, previews: [], rewriteTests: [], draftActions: [] }; window.configEvents = []; window.settingsMode = "ok";
         const config = { backend: "auto", device: "auto", model_path: "/local/test-model", language: "auto", beam_size: 1, cpu_threads: 4, max_seconds: 120, idle_seconds: 1800, warmup_on_record: true, initial_prompt: "OpenCode", text_mode: "clean", punctuation_mode: "auto", space_mode: "preserve", vocabulary_preset: "coding", vocabulary: [], replacements: [], prompt_template: "{text}", rewrite_base_url: "", rewrite_model: "", rewrite_prompt: "", rewrite_timeout: 15, rewrite_key_configured: false };
         window.fakeVoiceConfig = config;
+        const fakeModels = [
+          { id: "faster-whisper-large-v3-turbo", label: "large-v3-turbo（独显推荐 · 识别最准）", size_hint: "约 1.6 GB", description: "中英文混说与技术术语最准，有 NVIDIA 显卡时速度极快", installed: false, active: false, path: "/local/models/faster-whisper-large-v3-turbo" },
+          { id: "faster-whisper-small", label: "small（极速轻量 · CPU / 核显推荐）", size_hint: "约 480 MB", description: "体积小下载快、占用内存低，无独立显卡也能流畅使用", installed: false, active: false, path: "/local/models/faster-whisper-small" },
+        ];
         window.ocMic = {
           getConfig: async () => { window.calls.reads++; if (window.settingsMode === "error") throw new Error("ECONNREFUSED"); if (window.settingsMode === "slow") await new Promise(resolve => setTimeout(resolve, 250)); return { ...config }; },
           saveConfig: async patch => {
@@ -198,6 +202,26 @@ async function main() {
           testRewrite: async (overrides, key) => {
             window.calls.rewriteTests.push({ overrides: { ...overrides }, hasKey: typeof key === "string" && key.length > 0, fixedText: "固定连接测试句" });
             return { ok: true, message: "连接测试成功" };
+          },
+          listSttModels: async (overrides, key) => {
+            window.calls.sttModelFetches = (window.calls.sttModelFetches || []).concat([{ url: overrides.stt_base_url, hasKey: typeof key === "string" && key.length > 0 }]);
+            return { ok: true, models: ["whisper-large-v3-turbo", "FunAudioLLM/SenseVoiceSmall"], message: "已获取 2 个可用模型。" };
+          },
+          listRewriteModels: async (overrides, key) => {
+            window.calls.rewriteModelFetches = (window.calls.rewriteModelFetches || []).concat([{ url: overrides.rewrite_base_url, hasKey: typeof key === "string" && key.length > 0 }]);
+            return { ok: true, models: ["gpt-4o-mini", "deepseek-chat"], message: "已获取 2 个可用模型。" };
+          },
+          listModels: async () => ({
+            recommended_id: "faster-whisper-large-v3-turbo",
+            can_download: true,
+            models: fakeModels.map(item => ({ ...item, active: item.installed && config.model_path === item.path })),
+            download: { state: "idle", id: "", message: "" },
+          }),
+          downloadModel: async (id, activate = true) => {
+            const target = fakeModels.find(item => item.id === id);
+            target.installed = true;
+            if (activate) config.model_path = target.path;
+            return { ok: true, installed: true, activated: !!activate, path: target.path, config: { ...config }, catalog: await window.ocMic.listModels() };
           },
           status: async () => ({ backend: "fake", device: "cuda", model_state: "ready" }),
           warmup: async () => { window.calls.warmups++; return { id: "warmup-test", state: "queued" }; },
@@ -281,7 +305,7 @@ async function main() {
         await page.waitForTimeout(100);
         const backendTrigger = select("backend").locator('[data-component="select-v2"]');
         const backendBeforeClick = await backendTrigger.innerText();
-        assert.match(backendBeforeClick, /自动（优先免下载方案）/);
+        assert.match(backendBeforeClick, /自动判断（填好哪个就用哪个）/);
         const backendTriggerBox = await backendTrigger.boundingBox();
         await backendTrigger.click();
         const fasterOption = page.getByRole("option", { name: "faster-whisper" });
@@ -319,6 +343,30 @@ async function main() {
         await page.keyboard.press("Escape");
         await page.locator("#oc-voice-settings .settings-v2-tab-title").click();
         assert.equal(await page.locator("#oc-voice-runtime").textContent(), "模型已就绪 · GPU / CUDA");
+      });
+      await check("recommended offline model selector downloads and activates model path in one click", async () => {
+        await select("local-model-preset").scrollIntoViewIfNeeded();
+        assert.match(await select("local-model-preset").innerText(), /large-v3-turbo/);
+        const actionBtn = page.locator("#oc-voice-local-model-action");
+        assert.match(await actionBtn.innerText(), /一键下载并启用/);
+        await actionBtn.click();
+        await page.waitForFunction(() => document.getElementById("oc-voice-model-path")?.value === "/local/models/faster-whisper-large-v3-turbo");
+        assert.match(await actionBtn.innerText(), /当前已在使用/);
+        await page.locator("#oc-voice-model-path").fill("/local/test-model");
+      });
+      await check("cloud STT and AI rewrite fetch-models buttons populate selectors without manual typing", async () => {
+        await page.locator("#oc-voice-stt-base-url").scrollIntoViewIfNeeded();
+        await page.locator("#oc-voice-stt-base-url").fill("https://api.siliconflow.cn/v1");
+        await page.locator("#oc-voice-stt-api-key").fill("stt-temp-key");
+        await page.locator("#oc-voice-stt-fetch-models").click();
+        await page.waitForFunction(() => document.getElementById("oc-voice-stt-model")?.value === "whisper-large-v3-turbo");
+        assert.equal(await page.evaluate(() => window.calls.sttModelFetches.at(-1).hasKey), true);
+        await select("stt-model-select").click();
+        await clickOption("FunAudioLLM/SenseVoiceSmall");
+        assert.equal(await page.locator("#oc-voice-stt-model").inputValue(), "FunAudioLLM/SenseVoiceSmall");
+        await page.locator("#oc-voice-stt-base-url").fill("");
+        await page.locator("#oc-voice-stt-model").fill("");
+        await page.locator("#oc-voice-stt-api-key").fill("");
       });
       await check("save and reopen preserve settings, microphone event follows storage commit", async () => {
         await page.locator("[data-oc-voice-advanced]").evaluate(node => { node.open = true; });
@@ -359,7 +407,7 @@ async function main() {
         await page.waitForFunction(() => document.getElementById("oc-voice-settings-error").textContent.includes("已下载模型"));
         assert.equal(await page.evaluate(() => window.calls.saves.length), 1);
         await select("backend").click();
-        await clickOption("自动（优先免下载方案）");
+        await clickOption("自动判断（填好哪个就用哪个）");
         await page.locator("#oc-voice-model-path").fill("/local/test-model");
         await page.evaluate(() => { window.settingsMode = "save-error"; });
         await page.locator("#oc-voice-settings-save").click();
@@ -481,6 +529,11 @@ async function main() {
         await page.locator("#oc-voice-settings-save").click();
         await page.waitForFunction(() => document.getElementById("oc-voice-settings-error").textContent.includes("AI 兼容接口地址和模型名称"));
         assert.equal(await page.evaluate(() => window.calls.saves.length), savesBeforeMissingModel, "AI mode requires a model before save");
+        await page.locator("#oc-voice-rewrite-fetch-models").click();
+        await page.waitForFunction(() => document.getElementById("oc-voice-rewrite-model")?.value === "gpt-4o-mini");
+        await select("rewrite-model-select").click();
+        await clickOption("deepseek-chat");
+        assert.equal(await page.locator("#oc-voice-rewrite-model").inputValue(), "deepseek-chat");
         await page.locator("#oc-voice-rewrite-model").fill("test-model");
         await textArea("rewrite-prompt").fill("保留技术术语");
         const savesBeforeInvalidTimeout = await page.evaluate(() => window.calls.saves.length);

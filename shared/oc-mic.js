@@ -178,6 +178,7 @@
     waveSample = 0
     var samples = analyser ? new Float32Array(analyser.fftSize) : null
     var previousTime = 0, sampleInterval = 160, spacing = 6
+    var cachedColor = "", colorSample = -1000
     function frame(time) {
       if (run !== token || state !== "recording" || !ui || !ui.root.isConnected) return
       var canvas = ui.wave, box = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1
@@ -200,11 +201,12 @@
       }
       if (context) {
         context.setTransform(dpr, 0, 0, dpr, 0, 0); context.clearRect(0, 0, box.width, box.height)
-        var color = getComputedStyle(ui.root).color
+        if (!cachedColor || time - colorSample >= 500) { cachedColor = getComputedStyle(ui.root).color; colorSample = time }
+        context.fillStyle = cachedColor
         var drift = Math.min(1, (time - waveSample) / sampleInterval) * spacing
         for (var j = 0; j < count; j++) {
           var level = waveHistory[waveHistory.length - count + j] || 0, h = Math.max(3, Math.min(24, level * 21 + 3))
-          context.fillStyle = color; context.globalAlpha = j < count - 22 ? .32 : .65
+          context.globalAlpha = j < count - 22 ? .32 : .65
           context.beginPath(); context.roundRect(j * spacing + 2 - drift, (box.height - h) / 2, 2.8, h, 1.4); context.fill()
         }
         context.globalAlpha = 1
@@ -294,16 +296,23 @@
     function str(off, s) { for (var k = 0; k < s.length; k++) view.setUint8(off + k, s.charCodeAt(k)) }
     str(0, "RIFF"); view.setUint32(4, 36 + size * 2, true); str(8, "WAVE"); str(12, "fmt "); view.setUint32(16, 16, true)
     view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); str(36, "data"); view.setUint32(40, size * 2, true)
-    var channels = []
-    for (var c = 0; c < audio.numberOfChannels; c++) channels.push(audio.getChannelData(c))
+    var channels = [], channelCount = audio.numberOfChannels, ratio = inputRate / rate, inputLen = audio.length
+    for (var c = 0; c < channelCount; c++) channels.push(audio.getChannelData(c))
+    var mono = channelCount === 1 ? channels[0] : null
     // Area averaging performs downsampling without discarding all between-sample energy.
     for (var i = 0; i < size; i++) {
-      var from = i * inputRate / rate, to = Math.min(audio.length, (i + 1) * inputRate / rate), sum = 0, weight = 0
-      for (var j = Math.floor(from); j < Math.ceil(to); j++) {
+      var from = i * ratio, to = Math.min(inputLen, (i + 1) * ratio), sum = 0, weight = 0
+      var start = Math.floor(from), stop = Math.min(inputLen, Math.ceil(to))
+      for (var j = start; j < stop; j++) {
         var w = Math.min(to, j + 1) - Math.max(from, j)
-        if (j >= audio.length || w <= 0) continue
-        var value = 0; for (var k = 0; k < channels.length; k++) value += channels[k][j]
-        sum += value / channels.length * w; weight += w
+        if (w <= 0) continue
+        if (mono) {
+          sum += mono[j] * w
+        } else {
+          var value = 0; for (var k = 0; k < channelCount; k++) value += channels[k][j]
+          sum += value / channelCount * w
+        }
+        weight += w
       }
       var sample = Math.max(-1, Math.min(1, weight ? sum / weight : 0)); view.setInt16(44 + i * 2, Math.round(sample < 0 ? sample * 32768 : sample * 32767), true)
     }

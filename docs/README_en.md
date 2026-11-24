@@ -5,7 +5,7 @@ Speak directly in OpenCode and turn your ideas into editable prompts.
 [![CI](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml/badge.svg)](https://github.com/ForrestKang/opencode-local-voice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
 
-[简体中文](../README.md) · [Installation](install.md) · [Configuration](configuration.md) · [Changelog (V0.2.1)](../CHANGELOG.md) · [V0.2.0 release notes](release-v0.2.0.md)
+[简体中文](../README.md) · [Installation](install.md) · [Configuration](configuration.md) · [Changelog (V0.2.1)](../CHANGELOG.md) · [Recovery](recovery.md)
 
 OpenCode Local Voice adds voice input to OpenCode. Click the microphone next to the prompt, speak, and finish recording. The transcript appears in your current draft, ready for you to edit and send.
 
@@ -13,16 +13,16 @@ On desktop, Voice Input lives inside OpenCode's native settings and uses the hos
 
 ## Features
 
-- **Zero-download lightweight default**: Default installation skips Whisper model downloads and heavy `pip` packages, creating a minimal stdlib-only Python virtual environment (`--without-pip`).
+- **Zero-download lightweight default + optional 0.8 MB Rust single-binary daemon**: Default installation skips Whisper model downloads and heavy `pip` packages. An optional pure-Rust zero-Python daemon (`rust/oc-voice-daemon`, ~0.8 MB release binary) supports OpenAI-compatible STT, AI rewriting, Chinese auto-punctuation, and lightweight `whisper-cli` offline engines, with automatic dual-backend discovery in `desktop-bridge.cjs`.
 - **Platform-adapted recognition**:
   - **macOS**: Uses built-in **Apple Speech** (`SFSpeechRecognizer`, supporting on-device recognition when available) with zero extra downloads.
   - **Windows / Linux / Cross-platform**: Supports **OpenAI-compatible STT APIs** (Groq Whisper, SiliconFlow SenseVoice, OpenAI Whisper, or a localhost Whisper server).
-  - **Optional high-accuracy local models**: Opt in to `faster-whisper` or Apple Silicon MLX anytime with `-WithLocalModel` / `--with-local-model`.
+  - **Optional high-accuracy local models**: Opt in to `faster-whisper`, Apple Silicon MLX, or lightweight `whisper-cli` anytime.
 - **Native settings**: Manage recognition mode, API presets, microphone, language, and text processing in one place.
 - **Vocabulary and corrections**: Built-in coding vocabulary, custom terms, replacement rules, and JSON import/export.
-- **Text formatting**: Chinese or English punctuation, spacing options, coding templates, and custom templates.
+- **Smart punctuation and auto-segmentation**: Natural Chinese/English punctuation, pause-to-comma smart spacing, automatic Chinese clause breaks (protecting code, URLs, and file paths), plus coding and custom templates.
 - **Optional AI rewriting**: Connects to any OpenAI-compatible chat endpoint. Local formatting is the default.
-- **Update recovery**: Supported Windows desktop installations keep backup-based patch restoration.
+- **Instant update adaptation & rolling backup pruning**: Windows ships `Repair-Voice.cmd -Compat` (1-second `app.asar` anchor check), `-Adapt` (one-command re-patch after OpenCode updates), and automatic rolling backup/cache pruning.
 
 ## Quick start
 
@@ -78,7 +78,7 @@ Desktop integration patches Electron's `app.asar` and depends on OpenCode's appl
 
 Tauri, store packages, and unknown desktop layouts are not supported by the patcher. The macOS patch ad-hoc signs the candidate application, which can affect system trust and updates. Read the [macOS installation notes](install.md#macos) before applying it.
 
-If voice input disappears after an OpenCode update, follow the [update guide](update-survival.md). To restore the pre-installation state, use the [recovery guide](recovery-v0.2.0.md).
+If voice input disappears after an OpenCode update, follow the [update guide](update-survival.md). To restore the pre-installation state, use the [recovery guide](recovery.md).
 
 ## Privacy
 

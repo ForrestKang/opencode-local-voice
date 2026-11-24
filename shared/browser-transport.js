@@ -61,13 +61,24 @@
           if (!created) throw error
         }
         if (created.id !== id) throw failure("BAD_RESPONSE", "任务标识不匹配")
+        var liveStates = { queued: true, loading: true, transcribing: true, rewriting: true }
         while (Date.now() < deadline) {
           if (cancelled.has(id)) return { error: "已取消", code: "CANCELLED" }
-          var job = await request("GET", "/v1/jobs/" + id)
-          if (job.state !== previous) { previous = job.state; listeners.forEach(function (listener) { try { listener({ id: id, state: job.state, timings: job.timings, raw_text: job.raw_text, local_text: job.local_text }) } catch (_) {} }) }
+          var remainingMs = Math.max(10, deadline - Date.now()), route = "/v1/jobs/" + id, reqTimeout = 12000
+          if (liveStates[previous]) {
+            var waitSec = Math.min(5, Math.max(0.05, remainingMs / 1000))
+            route += "?wait=" + waitSec.toFixed(3) + "&after_state=" + previous
+            reqTimeout = Math.max(12000, Math.ceil(waitSec * 1000) + 5000)
+          }
+          var pollStarted = Date.now()
+          var job = await request("GET", route, null, false, {}, reqTimeout)
+          var changed = job.state !== previous
+          if (changed) { previous = job.state; listeners.forEach(function (listener) { try { listener({ id: id, state: job.state, timings: job.timings, raw_text: job.raw_text, local_text: job.local_text }) } catch (_) {} }) }
           if (job.state === "done") { finished = true; return { text: job.text, raw_text: job.raw_text ?? job.text ?? "", local_text: job.local_text ?? job.text ?? "", processing_warning: job.processing_warning || null, timings: job.timings, id: id } }
           if (job.state === "error" || job.state === "cancelled") { finished = true; return { error: typeof job.error === "string" ? job.error : "转写失败", code: job.code || (job.state === "cancelled" ? "CANCELLED" : "INFERENCE_FAILED") } }
-          await new Promise(function (resolve) { setTimeout(resolve, 200) })
+          if (!changed && Date.now() - pollStarted < 50) {
+            await new Promise(function (resolve) { setTimeout(resolve, Math.min(200, Math.max(10, deadline - Date.now()))) })
+          }
         }
         throw failure("JOB_TIMEOUT", "转写超时，可以重试保留的录音")
       } finally { if (!finished) await cancel(id).catch(function () {}) }
@@ -79,6 +90,10 @@
       previewText: async function (text, config, key) { await ensure(); return request("POST", "/v1/text", Object.assign({ text: text, config: config || {} }, key !== undefined ? { rewrite_api_key: key } : {}), false, {}, 75000) },
       testRewrite: async function (config, key) { await ensure(); return request("POST", "/v1/rewrite/test", Object.assign({ config: config || {} }, key !== undefined ? { rewrite_api_key: key } : {}), false, {}, 75000) },
       testStt: async function (config, key) { await ensure(); return request("POST", "/v1/stt/test", Object.assign({ config: config || {} }, key !== undefined ? { stt_api_key: key } : {}), false, {}, 75000) },
+      listRewriteModels: async function (config, key) { await ensure(); return request("POST", "/v1/rewrite/models", Object.assign({ config: config || {} }, key !== undefined ? { rewrite_api_key: key } : {}), false, {}, 35000) },
+      listSttModels: async function (config, key) { await ensure(); return request("POST", "/v1/stt/models", Object.assign({ config: config || {} }, key !== undefined ? { stt_api_key: key } : {}), false, {}, 35000) },
+      listModels: function () { return call("GET", "/v1/models") },
+      downloadModel: function (id, activate) { return call("POST", "/v1/models/download", { id: id, activate: activate !== false }) },
       onProgress: function (listener) { listeners.add(listener); return function () { listeners.delete(listener) } } }
   }
   root.createOcVoiceTransport = createBrowserTransport

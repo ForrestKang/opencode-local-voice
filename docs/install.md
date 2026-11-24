@@ -41,19 +41,24 @@ powershell -ExecutionPolicy Bypass -File .\windows\install.ps1 -AppPath "D:\Apps
 
 ### 更新已有插件
 
-本地服务已安装时，可以只应用新的桌面补丁。先生成候选并检查兼容性：
+本地服务已安装时，可直接运行一键更新入口（自动保留现有配置和本地模型）：
+
+```powershell
+# 检查兼容性（OpenCode 运行期间也可执行）
+.\windows\Update-Plugin.cmd -DryRun
+
+# 退出 OpenCode 后执行增量更新；需要从 GitHub Releases 拉取新版时加 -FromGitHub
+.\windows\Update-Plugin.cmd
+```
+
+若仅重打桌面补丁，也可继续先检查并执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\windows\install-feature-preview.ps1 -DryRun
-```
-
-检查通过并完全退出 OpenCode 后安装：
-
-```powershell
 .\windows\install-feature-preview.cmd
 ```
 
-自定义应用目录可通过 `install-feature-preview.ps1 -AppPath "D:\Apps\OpenCode"` 指定。备份由安装器管理，恢复命令见 [恢复指南](recovery-v0.2.0.md)。
+自定义应用目录可通过 `install-feature-preview.ps1 -AppPath "D:\Apps\OpenCode"` 指定。备份由安装器管理，恢复命令见 [恢复指南](recovery.md)。
 
 ## macOS
 
@@ -84,7 +89,7 @@ bash macos/apply-oc-mic.sh --app /Applications/OpenCode.app
 
 脚本会保留完整 `.app` 备份，并对候选应用进行 ad-hoc 签名。如果原包启用了 Electron 的 ASAR 完整性验证 fuse，候选包会关闭该验证。这会改变应用的信任与完整性保护，ad-hoc 签名也不等同于官方签名或公证；请在了解这些影响后使用桌面补丁。
 
-首次录音时允许系统麦克风与语音识别权限；若被拒绝，请在系统的隐私与安全性设置中调整。官方更新替换 `.app` 后，需要重新应用兼容补丁。完整应用恢复见 [恢复指南](recovery-v0.2.0.md#macos)。
+首次录音时允许系统麦克风与语音识别权限；若被拒绝，请在系统的隐私与安全性设置中调整。官方更新替换 `.app` 后，需要重新应用兼容补丁。完整应用恢复见 [恢复指南](recovery.md#macos)。
 
 ## Linux
 

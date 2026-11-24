@@ -8,6 +8,7 @@ __pycache__/
 node_modules/
 dist/
 test-results/
+rust/**/target/
 .venv-test/
 *.personal.user.js
 models/
@@ -17,3 +18,4 @@ config.json
 credentials.json
 token
 rewrite_api_key
+stt_api_key

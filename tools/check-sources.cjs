@@ -8,11 +8,12 @@ for (const directory of directories) for (const name of fs.readdirSync(path.join
   if (!/\.(c?js)$/.test(name)) continue;
   execFileSync(process.execPath, ["--check", path.join(root, directory, name)]); count++;
 }
-const canonical = fs.readFileSync(path.join(root, "shared/oc-mic.js"));
-for (const platform of ["windows", "macos"]) {
-  if (!canonical.equals(fs.readFileSync(path.join(root, platform, "oc-mic.js")))) throw new Error(platform + " renderer copy is out of date; run npm run sync-renderer");
+const canonical = path.join(root, "shared/oc-mic.js");
+if (!fs.existsSync(canonical)) throw new Error("shared/oc-mic.js is missing");
+for (const legacy of ["windows/oc-mic.js", "macos/oc-mic.js", "windows/stt_server.py", "macos/stt_server.py", "linux/stt_server.py"]) {
+  if (fs.existsSync(path.join(root, legacy))) throw new Error("legacy platform duplicate should not remain: " + legacy);
 }
-console.log(count + " JavaScript files parsed; platform renderers match the shared source.");
+console.log(count + " JavaScript files parsed; shared/oc-mic.js is the single renderer source.");
 const workflow = yaml.parse(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"));
 if (!workflow.on || !workflow.jobs || Object.keys(workflow.jobs).length !== 2) throw new Error("CI workflow is incomplete");
 for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {

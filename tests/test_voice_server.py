@@ -690,6 +690,28 @@ class ConfigAndWorkerTests(unittest.TestCase):
         self.assertIn("OpenCode", captured["initial_prompt"])
         self.assertIn("CustomFramework", captured["hotwords"])
         self.assertLessEqual(len(captured["initial_prompt"]), 1900)
+        self.assertFalse(captured["without_timestamps"])
+        joined = voice_server.FasterWhisperEngine._join_segments([
+            SimpleNamespace(start=0.0, end=1.2, text="先看这个文件"),
+            SimpleNamespace(start=1.4, end=2.5, text="然后再跑测试"),
+            SimpleNamespace(start=2.7, end=3.5, text="，看看结果。"),
+        ])
+        self.assertEqual(joined, "先看这个文件，然后再跑测试，看看结果。")
+
+        # Long segment gap (>=0.75s) ends sentence with period/question mark, and word pauses break unpunctuated segments.
+        joined_pauses = voice_server.FasterWhisperEngine._join_segments([
+            SimpleNamespace(
+                start=0.0,
+                end=3.0,
+                text="我记得设置里面有标点选项能不能自动断句呢",
+                words=[
+                    SimpleNamespace(start=0.0, end=1.2, word="我记得设置里面有标点选项"),
+                    SimpleNamespace(start=1.65, end=3.0, word="能不能自动断句呢"),
+                ],
+            ),
+            SimpleNamespace(start=3.9, end=5.0, text="请帮我优化一下"),
+        ])
+        self.assertEqual(joined_pauses, "我记得设置里面有标点选项，能不能自动断句呢？请帮我优化一下")
 
     def test_mlx_043_greedy_omits_unsupported_beam_option(self):
         captured = {}
@@ -1174,6 +1196,509 @@ class Option2LightweightTests(unittest.TestCase):
             cmd = popen_mock.call_args[0][0]
             self.assertIn("--audio", cmd)
             self.assertIn("--language", cmd)
+
+    def test_coordinator_wait_and_http_long_poll_wake_without_polling_delay(self):
+        class DelayedFakeWorker(QuickFakeWorker):
+            def _run(self):
+                while True:
+                    task = self.in_queue.get()
+                    if task is None:
+                        return
+                    self.out_queue.put({"type": "state", "id": task["id"], "state": "transcribing"})
+                    time.sleep(0.08)
+                    self.out_queue.put({
+                        "type": "result", "id": task["id"], "state": "done",
+                        "text": "wake fast", "backend": "fake", "device": "cpu",
+                        "timings": {"queue_seconds": 0.0, "load_seconds": 0.0,
+                                    "inference_seconds": 0.08, "total_seconds": 0.08, "audio_seconds": 0.1},
+                    })
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = ConfigStore(Path(temp) / "voice-home")
+            coordinator = Coordinator(store.get(), worker_factory=DelayedFakeWorker)
+            server = create_server(store=store, coordinator=coordinator, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                job_id = str(uuid.uuid4())
+                coordinator.enqueue(job_id, wav16())
+                started = time.monotonic()
+                result = voice_cli._wait_job(server.server_address[1], store.token, job_id, timeout=5.0)
+                elapsed = time.monotonic() - started
+                self.assertEqual(result["state"], "done")
+                self.assertEqual(result["text"], "wake fast")
+                self.assertLess(elapsed, 0.7)
+            finally:
+                server.shutdown()
+                server.server_close()
+                coordinator.close()
+                thread.join(timeout=2)
+
+    def test_config_store_secret_stat_cache_and_invalidation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ConfigStore(Path(temp) / "voice-home")
+            store.update({"rewrite_api_key": "rw-one", "stt_api_key": "stt-one"})
+            with patch.object(store.secret_store, "read", wraps=store.secret_store.read) as rw_spy, \
+                    patch.object(store.stt_secret_store, "read", wraps=store.stt_secret_store.read) as stt_spy:
+                self.assertEqual(store.get_rewrite_api_key(), "rw-one")
+                self.assertEqual(store.get_rewrite_api_key(), "rw-one")
+                self.assertEqual(store.get_stt_api_key(), "stt-one")
+                self.assertEqual(store.get_stt_api_key(), "stt-one")
+                self.assertEqual(rw_spy.call_count, 1)
+                self.assertEqual(stt_spy.call_count, 1)
+                store.update({"rewrite_api_key": "rw-two"})
+                self.assertEqual(store.get_rewrite_api_key(), "rw-two")
+                self.assertEqual(store.get_rewrite_api_key(), "rw-two")
+                self.assertEqual(rw_spy.call_count, 2)
+
+    def test_sherpa_onnx_detection_engine_variants_and_auto_backend(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            sv_dir = base / "sensevoice"
+            sv_dir.mkdir()
+            (sv_dir / "tokens.txt").write_text("a 0\n", encoding="utf-8")
+            (sv_dir / "model.int8.onnx").write_bytes(b"onnx")
+
+            ms1_dir = base / "moonshine-v1"
+            ms1_dir.mkdir()
+            for name in ("tokens.txt", "preprocess.onnx", "encode.int8.onnx",
+                         "uncached_decode.int8.onnx", "cached_decode.int8.onnx"):
+                (ms1_dir / name).write_bytes(b"x")
+
+            ms2_dir = base / "moonshine-v2"
+            ms2_dir.mkdir()
+            for name in ("tokens.txt", "encoder_model.int8.onnx", "decoder_model_merged.int8.onnx"):
+                (ms2_dir / name).write_bytes(b"x")
+
+            sv_kind, _ = voice_server.detect_sherpa_model(sv_dir)
+            self.assertEqual(sv_kind, "sense-voice")
+            self.assertEqual(voice_server.detect_sherpa_model(ms1_dir)[0], "moonshine")
+            self.assertEqual(voice_server.detect_sherpa_model(ms2_dir)[0], "moonshine-v2")
+
+            auto_cfg = voice_server.validate_config({"backend": "auto", "model_path": str(sv_dir)})
+            with patch.object(voice_server, "local_sherpa_installed", return_value=True):
+                self.assertEqual(voice_server.resolve_backend(auto_cfg), "sherpa-onnx")
+            self.assertIn("sherpa_onnx", voice_server.capabilities_snapshot())
+
+            calls = []
+
+            class FakeStream:
+                def __init__(self):
+                    self.accepted = None
+                    self.result = SimpleNamespace(text=" sherpa hello ", lang="<|en|>")
+
+                def accept_waveform(self, sr, samples):
+                    self.accepted = (sr, samples)
+
+            class FakeRecognizer:
+                def __init__(self, tag):
+                    self.tag = tag
+
+                def create_stream(self):
+                    return FakeStream()
+
+                def decode_stream(self, stream):
+                    stream.result = SimpleNamespace(text=f"{self.tag} ok", lang="<|zh|>")
+
+            class FakeOfflineRecognizer:
+                @staticmethod
+                def from_sense_voice(**kwargs):
+                    calls.append(("sense_voice", kwargs))
+                    if kwargs.get("provider") == "cuda":
+                        raise RuntimeError("cuda unavailable")
+                    return FakeRecognizer("sv")
+
+                @staticmethod
+                def from_moonshine(**kwargs):
+                    calls.append(("moonshine", kwargs))
+                    return FakeRecognizer("ms1")
+
+                @staticmethod
+                def from_moonshine_v2(**kwargs):
+                    calls.append(("moonshine_v2", kwargs))
+                    return FakeRecognizer("ms2")
+
+            fake_sherpa = ModuleType("sherpa_onnx")
+            fake_sherpa.OfflineRecognizer = FakeOfflineRecognizer
+            with patch.dict(sys.modules, {"sherpa_onnx": fake_sherpa}):
+                sv_cfg = voice_server.validate_config(
+                    {"backend": "sherpa-onnx", "device": "auto", "model_path": str(sv_dir), "language": "zh"}
+                )
+                # Force provider lookup path cleanly by passing device="cuda" vs device="auto"
+                sv_cfg["device"] = "cpu"
+                engine = voice_server.SherpaOnnxEngine(sv_cfg)
+                self.assertEqual(engine.transcribe([0.0, 0.1]), ("sv ok", "zh"))
+                self.assertTrue(calls[-1][1]["use_itn"])
+                self.assertEqual(calls[-1][1]["language"], "zh")
+
+                ms1_cfg = voice_server.validate_config({"backend": "sherpa-onnx", "model_path": str(ms1_dir)})
+                self.assertEqual(voice_server.SherpaOnnxEngine(ms1_cfg).transcribe([0.0]), ("ms1 ok", "zh"))
+
+                ms2_cfg = voice_server.validate_config({"backend": "sherpa-onnx", "model_path": str(ms2_dir)})
+                self.assertEqual(voice_server.SherpaOnnxEngine(ms2_cfg).transcribe([0.0]), ("ms2 ok", "zh"))
+
+                cuda_cfg = dict(sv_cfg, device="cuda")
+                with self.assertRaises(RuntimeError):
+                    voice_server.SherpaOnnxEngine(cuda_cfg)
+
+                # Test _trim_edges_silence safely trims padded non-silent signal when numpy is present
+                try:
+                    import numpy as np
+                except ImportError:
+                    np = None
+                if np is not None:
+                    sig = np.zeros(16000 * 3, dtype=np.float32)
+                    sig[16000:24000] = 0.25
+                    trimmed = voice_server._trim_edges_silence(sig, 16000)
+                    self.assertLess(len(trimmed), len(sig))
+                    self.assertGreaterEqual(len(trimmed), 8000)
+
+    def test_model_catalog_detection_allowlist_and_activation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "voice-home"
+            store = ConfigStore(home)
+            coordinator = Coordinator(store.get(), worker_factory=QuickFakeWorker)
+            server = create_server(store=store, coordinator=coordinator, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            port = server.server_address[1]
+            def req(method, path, payload=None):
+                headers = {"Authorization": "Bearer " + store.token}
+                raw_body = None
+                if payload is not None:
+                    headers["Content-Type"] = "application/json"
+                    raw_body = json.dumps(payload).encode("utf-8")
+                http_req = Request(f"http://127.0.0.1:{port}{path}", data=raw_body, headers=headers, method=method)
+                try:
+                    resp = urlopen(http_req, timeout=5)
+                except HTTPError as exc:
+                    return exc.code, json.loads(exc.read().decode("utf-8"))
+                with resp:
+                    raw = resp.read()
+                    return resp.status, json.loads(raw.decode("utf-8")) if raw else {}
+
+            try:
+                status, body = req("GET", "/v1/models")
+                self.assertEqual(status, 200)
+                ids = {item["id"] for item in body["models"]}
+                self.assertIn("faster-whisper-large-v3-turbo", ids)
+                self.assertIn("faster-whisper-small", ids)
+                self.assertTrue(all(not item["installed"] for item in body["models"]))
+
+                bad_status, bad_body = req("POST", "/v1/models/download", {"id": "../evil"})
+                self.assertEqual(bad_status, 400)
+                self.assertIn("不支持", bad_body["error"])
+
+                model_dir = home / "models" / "faster-whisper-small"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                (model_dir / "config.json").write_text("{}", encoding="utf-8")
+                (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+                (model_dir / "model.bin").write_bytes(b"w" * (1024 * 1024 + 16))
+
+                ok_status, ok_body = req(
+                    "POST", "/v1/models/download",
+                    {"id": "faster-whisper-small", "activate": True},
+                )
+                self.assertEqual(ok_status, 200)
+                self.assertTrue(ok_body["installed"])
+                self.assertTrue(ok_body["activated"])
+                self.assertEqual(Path(ok_body["config"]["model_path"]).resolve(), model_dir.resolve())
+
+                status2, body2 = req("GET", "/v1/models")
+                self.assertEqual(status2, 200)
+                small = next(item for item in body2["models"] if item["id"] == "faster-whisper-small")
+                self.assertTrue(small["installed"])
+                self.assertTrue(small["active"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                coordinator.close()
+                thread.join(timeout=2)
+
+    def test_nvidia_gpu_detection_recommends_large_v3_turbo(self):
+        saved = voice_server._NVIDIA_GPU_CACHE
+        try:
+            voice_server._NVIDIA_GPU_CACHE = None
+            fake_proc = SimpleNamespace(returncode=0, stdout="GPU 0: NVIDIA GeForce RTX 4060\n")
+            with patch.object(voice_server.shutil, "which", return_value="nvidia-smi"), \
+                 patch.object(voice_server.subprocess, "run", return_value=fake_proc):
+                self.assertTrue(voice_server._has_nvidia_gpu())
+        finally:
+            voice_server._NVIDIA_GPU_CACHE = saved
+
+    def test_remote_model_list_endpoints_for_stt_and_rewrite(self):
+        seen_auths = []
+
+        class StubModelsHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                return
+
+            def do_GET(self):
+                seen_auths.append((self.path, self.headers.get("Authorization")))
+                body = json.dumps({"data": [{"id": "remote-model-a"}, {"id": "remote-model-b"}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        stub = HTTPServer(("127.0.0.1", 0), StubModelsHandler)
+        stub_thread = threading.Thread(target=stub.serve_forever, daemon=True)
+        stub_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                home = Path(temp) / "voice-home"
+                store = ConfigStore(home)
+                store.update({"stt_api_key": "saved-stt-key", "rewrite_api_key": "saved-rewrite-key"})
+                coordinator = Coordinator(store.get(), worker_factory=QuickFakeWorker)
+                server = create_server(store=store, coordinator=coordinator, port=0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                port = server.server_address[1]
+                base = f"http://127.0.0.1:{stub.server_address[1]}/v1"
+
+                def post_json(path, payload):
+                    req = Request(
+                        f"http://127.0.0.1:{port}{path}",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Authorization": "Bearer " + store.token, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    try:
+                        with urlopen(req, timeout=5) as resp:
+                            return resp.status, json.loads(resp.read().decode("utf-8"))
+                    except HTTPError as exc:
+                        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+                try:
+                    s1, b1 = post_json("/v1/stt/models", {"config": {"stt_base_url": base}})
+                    self.assertEqual(s1, 200)
+                    self.assertTrue(b1["ok"])
+                    self.assertEqual(b1["models"], ["remote-model-a", "remote-model-b"])
+
+                    s2, b2 = post_json(
+                        "/v1/rewrite/models",
+                        {"config": {"rewrite_base_url": base + "/chat/completions"}, "rewrite_api_key": "override-rw-key"},
+                    )
+                    self.assertEqual(s2, 200)
+                    self.assertTrue(b2["ok"])
+                    self.assertEqual(b2["models"], ["remote-model-a", "remote-model-b"])
+
+                    bad_s, _ = post_json("/v1/stt/models", {"config": {}, "unexpected": 1})
+                    self.assertEqual(bad_s, 400)
+                    self.assertEqual(seen_auths[0], ("/v1/models", "Bearer saved-stt-key"))
+                    self.assertEqual(seen_auths[1], ("/v1/models", "Bearer override-rw-key"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    coordinator.close()
+                    thread.join(timeout=2)
+        finally:
+            stub.shutdown()
+            stub.server_close()
+            stub_thread.join(timeout=2)
+
+    def test_job_long_poll_after_state_wakes_immediately_on_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = voice_server.ConfigStore(tmp)
+            coordinator = voice_server.Coordinator(store.get())
+            server = voice_server.create_server(port=0, store=store, coordinator=coordinator)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+            thread.start()
+            port = server.server_address[1]
+            try:
+                job_id = str(uuid.uuid4())
+                with coordinator._condition:
+                    job = voice_server.Job(job_id, None)
+                    job.state = "loading"
+                    coordinator.jobs[job_id] = job
+                    coordinator.active_id = job_id
+
+                def transition():
+                    time.sleep(0.08)
+                    coordinator._process_message(
+                        {"type": "state", "id": job_id, "state": "transcribing"},
+                        coordinator.worker_generation,
+                    )
+
+                mover = threading.Thread(target=transition, daemon=True)
+                mover.start()
+                started = time.monotonic()
+                req = Request(
+                    f"http://127.0.0.1:{port}/v1/jobs/{job_id}?wait=5&after_state=loading",
+                    headers={"Authorization": f"Bearer {store.token}"},
+                    method="GET",
+                )
+                with urlopen(req, timeout=5) as resp:
+                    elapsed = time.monotonic() - started
+                    payload = json.loads(resp.read().decode("utf-8"))
+                mover.join(timeout=2)
+                self.assertEqual(payload["state"], "transcribing")
+                self.assertLess(elapsed, 1.5, f"after_state long-poll should wake immediately, took {elapsed:.2f}s")
+
+                bad_req = Request(
+                    f"http://127.0.0.1:{port}/v1/jobs/{job_id}?wait=1&after_state=invalid",
+                    headers={"Authorization": f"Bearer {store.token}"},
+                    method="GET",
+                )
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(bad_req, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+            finally:
+                server.shutdown()
+                server.server_close()
+                coordinator.close()
+                thread.join(timeout=2)
+
+    def test_sherpa_language_change_reloads_worker_and_clears_warmup_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = voice_server.ConfigStore(tmp)
+            cfg = store.get()
+            stopped = []
+
+            class StubWorker:
+                def poll(self, timeout=0.1):
+                    time.sleep(timeout)
+                    return None
+
+                def stop(self, terminate=False):
+                    stopped.append(terminate)
+
+            coordinator = voice_server.Coordinator(cfg)
+            try:
+                with coordinator._condition:
+                    coordinator.worker = StubWorker()
+                    coordinator.backend = "sherpa-onnx"
+                    coordinator.model_state = "ready"
+                    coordinator.last_warmup_id = "warmup-old"
+                updated_cfg = dict(cfg, language="en")
+                coordinator.update_config(updated_cfg, {"language"})
+                self.assertEqual(stopped, [False])
+                self.assertIsNone(coordinator.worker)
+                self.assertIsNone(coordinator.last_warmup_id)
+                self.assertEqual(coordinator.model_state, "unloaded")
+            finally:
+                coordinator.close()
+
+    def test_lightweight_job_records_audio_seconds_in_timings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = voice_server.ConfigStore(tmp)
+            cfg, _ = store.update({
+                "backend": "openai-api",
+                "stt_base_url": "https://api.example.com/v1",
+                "stt_model": "whisper-1",
+            })
+            coordinator = voice_server.Coordinator(cfg, stt_api_key="sk-test")
+            try:
+                job_id = str(uuid.uuid4())
+                with unittest.mock.patch.object(voice_server.voice_text, "transcribe_openai_compatible", return_value="hello world"):
+                    coordinator.enqueue(job_id, wav16(0.5))
+                    done = coordinator.wait(job_id, timeout=5)
+                self.assertIsNotNone(done)
+                self.assertEqual(done["state"], "done")
+                self.assertAlmostEqual(done["timings"]["audio_seconds"], 0.5, places=2)
+                self.assertIn("rewrite_seconds", done["timings"])
+            finally:
+                coordinator.close()
+
+    def test_model_download_reentrant_same_id_does_not_deadlock_and_blocks_idle_shutdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = voice_server.ConfigStore(tmp)
+            coordinator = voice_server.Coordinator(store.get())
+            app = voice_server.VoiceApp(store, coordinator)
+            release = threading.Event()
+            started = threading.Event()
+
+            def fake_run(spec, target, activate):
+                started.set()
+                release.wait(timeout=3)
+                with app.models._lock:
+                    app.models._state = {"state": "done", "id": spec["id"], "message": "ok", "endpoint": ""}
+
+            try:
+                with (
+                    unittest.mock.patch.object(voice_server, "_cached_module_installed", return_value=True),
+                    unittest.mock.patch.object(voice_server, "local_whisper_installed", return_value=True),
+                    unittest.mock.patch.object(app.models, "_run_download", side_effect=fake_run),
+                ):
+                    code1, body1 = app.models.start_download("faster-whisper-small", activate=False)
+                    self.assertEqual(code1, 202)
+                    self.assertTrue(body1["ok"])
+                    self.assertTrue(started.wait(timeout=2))
+
+                    # Idle expiration must stay False while a model download is in progress.
+                    app.last_access = time.monotonic() - 99999
+                    self.assertFalse(app.idle_expired())
+
+                    # Re-requesting the same in-flight model must return 202 promptly without deadlocking.
+                    box = {}
+
+                    def call_again():
+                        box["res"] = app.models.start_download("faster-whisper-small", activate=False)
+
+                    t = threading.Thread(target=call_again, daemon=True)
+                    t.start()
+                    t.join(timeout=2.0)
+                    self.assertFalse(t.is_alive(), "start_download deadlocked on reentrant same-id call")
+                    self.assertEqual(box["res"][0], 202)
+                    self.assertEqual(box["res"][1]["catalog"]["download"]["state"], "downloading")
+
+                    # Requesting a different model while one is active must still raise RuntimeError.
+                    with self.assertRaises(RuntimeError):
+                        app.models.start_download("faster-whisper-medium", activate=False)
+
+                    release.set()
+                    if app.models._thread is not None:
+                        app.models._thread.join(timeout=2.0)
+                    self.assertTrue(app.idle_expired())
+            finally:
+                release.set()
+                coordinator.close()
+
+    def test_update_config_stops_slow_worker_outside_coordinator_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = voice_server.ConfigStore(tmp)
+            cfg = store.get()
+            stop_entered = threading.Event()
+            allow_stop_exit = threading.Event()
+
+            class SlowStopWorker:
+                def poll(self, timeout=0.1):
+                    time.sleep(timeout)
+                    return None
+
+                def stop(self, terminate=False):
+                    stop_entered.set()
+                    allow_stop_exit.wait(timeout=3.0)
+
+            coordinator = voice_server.Coordinator(cfg)
+            try:
+                with coordinator._condition:
+                    coordinator.worker = SlowStopWorker()
+                    coordinator.backend = "faster-whisper"
+                    coordinator.model_state = "ready"
+
+                updater = threading.Thread(
+                    target=coordinator.update_config,
+                    args=(dict(cfg, cpu_threads=max(1, cfg["cpu_threads"] - 1 or 2)), {"cpu_threads"}),
+                    daemon=True,
+                )
+                updater.start()
+                self.assertTrue(stop_entered.wait(timeout=2.0))
+
+                # status() must acquire the coordinator lock immediately while worker.stop() is blocking.
+                t0 = time.monotonic()
+                snap = coordinator.status()
+                elapsed = time.monotonic() - t0
+                self.assertEqual(snap["model_state"], "unloaded")
+                self.assertLess(elapsed, 0.2, f"coordinator.status() blocked on worker.stop() for {elapsed:.2f}s")
+
+                allow_stop_exit.set()
+                updater.join(timeout=2.0)
+                self.assertFalse(updater.is_alive())
+            finally:
+                allow_stop_exit.set()
+                coordinator.close()
 
 
 if __name__ == "__main__":
