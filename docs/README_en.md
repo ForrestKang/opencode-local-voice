@@ -13,9 +13,13 @@
 
 ## Preview
 
-| Idle (native prompt integration) | Recording (live waveform, Enter to transcribe, Esc to cancel) |
-| :---: | :---: |
-| ![Idle](assets/idle.png) | ![Recording](assets/recording.png) |
+**Idle** (microphone button integrated natively into the prompt bar):
+
+![Idle](assets/idle.png)
+
+**Recording** (live audio waveform, **Enter** to finish & transcribe, **Esc** to cancel):
+
+![Recording](assets/recording.png)
 
 Click the microphone next to the prompt, speak, and press **Enter**. Transcripts are inserted into your draft for review—never auto-sent.
 
