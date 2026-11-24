@@ -21,7 +21,7 @@
 
 ![Recording](assets/recording.png)
 
-Click the microphone next to the prompt, speak, and press **Enter**. Transcripts are inserted into your draft for review—never auto-sent.
+Click the microphone next to the prompt, speak, and press **Enter** to insert the transcript into your draft.
 
 ---
 
